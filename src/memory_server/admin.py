@@ -199,6 +199,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     config = Config.from_env()
     dsn = config.database_url
+    ledger.ensure(config.policy_ledger)
     try:
         out = _dispatch(args, config, dsn)
     except ServiceError as exc:

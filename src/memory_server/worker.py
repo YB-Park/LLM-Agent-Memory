@@ -6,6 +6,7 @@ Duplicate computation is possible; duplicate publication is not.
 """
 import json
 import logging
+import signal
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ from typing import Any, Dict, Optional
 import psycopg2
 from psycopg2.extras import Json
 
-from . import hooks
+from . import hooks, ledger
 from .db import connect, run_tx
 from .engine import MAX_ARTIFACTS, MAX_OUTPUT_BYTES, EngineError, Snapshot, engine_for_spec
 from .errors import ServiceError
@@ -317,11 +318,18 @@ def main():
     parser.add_argument("--poll-interval", type=float, default=1.0)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    worker = Worker(Config.from_env())
+    config = Config.from_env()
+    ledger.ensure(config.policy_ledger)
+    worker = Worker(config)
     if args.once:
         print(json.dumps([o._asdict() for o in worker.run_until_idle()]))
     else:
-        worker.run_forever(args.poll_interval)
+        stop = threading.Event()
+        # SIGTERM/SIGINT finish the job in hand, then exit; an unfinished job is recovered by lease expiry.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        worker.run_forever(args.poll_interval, stop)
+        log.info("worker stopped")
 
 
 if __name__ == "__main__":

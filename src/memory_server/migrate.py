@@ -2,14 +2,37 @@
 import os
 import sys
 
-from .config import Config
+from psycopg2 import sql
+
+from .config import _setting
 from .db import connect
 
 MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "migrations")
 _LOCK_ID = 7_340_001
 
 
-def migrate(dsn, directory=MIGRATIONS_DIR):
+def provision_roles(cur, runtime_role=None, backup_role=None):
+    """Least-privilege grants, re-applied on every run so tables added by later migrations are covered.
+
+    The runtime role (API, worker, admin CLI) gets DML only: no DDL, no role management, no TRUNCATE/DELETE,
+    and audit_events/schema_migrations stay append-only/read-only for it. The backup role is read-only.
+    Roles themselves are created by the database administrator, never by this code.
+    """
+    if runtime_role:
+        role = sql.Identifier(runtime_role)
+        cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+        cur.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO {}").format(role))
+        cur.execute(sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(role))
+        cur.execute(sql.SQL("REVOKE UPDATE ON audit_events, schema_migrations FROM {}").format(role))
+        cur.execute(sql.SQL("REVOKE INSERT ON schema_migrations FROM {}").format(role))
+    if backup_role:
+        role = sql.Identifier(backup_role)  # what pg_dump needs, and nothing that writes
+        cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+        cur.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}").format(role))
+        cur.execute(sql.SQL("GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(role))
+
+
+def migrate(dsn, directory=MIGRATIONS_DIR, runtime_role=None, backup_role=None):
     files = sorted(f for f in os.listdir(directory) if f.endswith(".sql"))
     conn = connect(dsn)
     applied = []
@@ -27,6 +50,7 @@ def migrate(dsn, directory=MIGRATIONS_DIR):
                     cur.execute(fh.read())
                 cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (name,))
                 applied.append(name)
+            provision_roles(cur, runtime_role, backup_role)
         conn.commit()
     finally:
         conn.close()
@@ -34,7 +58,11 @@ def migrate(dsn, directory=MIGRATIONS_DIR):
 
 
 def main():
-    applied = migrate(Config.from_env().database_url)
+    env = os.environ
+    url = _setting(env, "MEMORY_MIGRATION_DATABASE_URL") or _setting(env, "MEMORY_DATABASE_URL", required=True)
+    applied = migrate(url,
+                      runtime_role=env.get("MEMORY_RUNTIME_ROLE") or None,
+                      backup_role=env.get("MEMORY_BACKUP_ROLE") or None)
     print("applied: %s" % (", ".join(applied) if applied else "(none)"), file=sys.stderr)
 
 

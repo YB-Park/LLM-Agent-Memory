@@ -20,7 +20,7 @@ import anyio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import mcp_tools
+from . import ledger, mcp_tools
 from .config import Config
 from .db import connect
 from .errors import ServiceError
@@ -225,6 +225,7 @@ def _ready(config):
 def create_app(config):
     if not config.allowed_hosts:
         raise SystemExit("MEMORY_ALLOWED_HOSTS is required (comma-separated public host names)")
+    ledger.ensure(config.policy_ledger)
     service = MemoryService(config)
     mcp = mcp_tools.build_server(service)
 

@@ -41,6 +41,7 @@ class Config:
     allowed_hosts: tuple = ()
     allowed_origins: tuple = ()
     policy_ledger: str = ""
+    require_ledger: bool = False
     auth_fail_limit: int = 20
     auth_fail_window_seconds: int = 60
     request_limit_per_minute: int = 600
@@ -58,7 +59,11 @@ class Config:
                             ("request_limit_per_minute", "MEMORY_REQUEST_LIMIT_PER_MINUTE")):
             if env.get(name):
                 extra[field] = int(env[name])
-        return cls(database_url=url, hmac_key=key.encode("utf-8"),
+        require = env.get("MEMORY_REQUIRE_LEDGER", "") in ("1", "true", "yes")
+        if require and not env.get("MEMORY_POLICY_LEDGER"):
+            raise SystemExit("MEMORY_REQUIRE_LEDGER is set but MEMORY_POLICY_LEDGER is empty: refusing to start "
+                             "without the policy ledger that makes restores safe")
+        return cls(database_url=url, require_ledger=require, hmac_key=key.encode("utf-8"),
                    allowed_hosts=_csv(env.get("MEMORY_ALLOWED_HOSTS")),
                    allowed_origins=_csv(env.get("MEMORY_ALLOWED_ORIGINS")),
                    policy_ledger=env.get("MEMORY_POLICY_LEDGER", ""), **extra)

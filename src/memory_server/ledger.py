@@ -64,6 +64,24 @@ def head(path):
     return {"seq": seq, "hash": digest}
 
 
+def ensure(path):
+    """Create an empty ledger at service start. A ledger that exists but is empty is legitimate; a ledger that is
+    MISSING when a backup says it should exist means history was lost, and recovery refuses to proceed."""
+    if not path or os.path.exists(path):
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    dfd = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def append(path, kind, data):
     """Durably append one entry; a no-op when no ledger is configured (tests, local development)."""
     if not path:
