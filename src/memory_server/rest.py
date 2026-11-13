@@ -69,6 +69,9 @@ def make_server(config, host="127.0.0.1", port=8080):
                     receipt, replayed = service.submit(token, payload, self.headers.get("Idempotency-Key"))
                     body = dict(receipt, request_id=request_id)
                     status = 200 if replayed else 202
+                elif method == "POST" and path == "/v1/memories/search":
+                    body = dict(service.search(token, self._read_json()), request_id=request_id)
+                    status = 200
                 elif method == "GET" and _JOB.match(path):
                     body = dict(service.get_job(token, _JOB.match(path).group(1)), request_id=request_id)
                     status = 200

@@ -27,6 +27,12 @@ def parse_uuid(value, field):
         raise invalid("%s must be a UUID string" % field)
 
 
+def iso(dt):
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def canonical_json(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

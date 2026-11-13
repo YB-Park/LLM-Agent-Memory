@@ -1,26 +1,19 @@
 """Application service: auth, authorization, submit/receipt/job/source (§3, §5.1, §6)."""
 import hashlib
 import uuid
-from datetime import timezone
 
 import psycopg2.errors
 from psycopg2.extras import Json
 
-from . import hooks
+from . import hooks, search as search_mod
 from .db import run_tx
-from .errors import ServiceError, not_found, unauthenticated
-from .validation import (hmac_hex, job_input_digest, parse_uuid, request_digest, sha256_hex,
+from .errors import ServiceError, invalid, not_found, unauthenticated
+from .validation import (hmac_hex, iso, job_input_digest, parse_uuid, request_digest, sha256_hex,
                          stored_metadata, validate_idempotency_key, validate_submit)
 
 
 def credential_digest(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def iso(dt):
-    if dt is None:
-        return None
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _lock_control(cur, exclusive):
@@ -135,6 +128,28 @@ class MemoryService:
         return {"api_version": "v1", "status": "accepted", "experience_id": str(experience_id),
                 "source_version": 1, "job_id": str(job_id), "generation_id": str(generation_id),
                 "replayed": replayed, "searchability": "not_guaranteed"}
+
+    # --- search -------------------------------------------------------
+    def search(self, token, body):
+        return run_tx(self.config, lambda cur: self._search_tx(cur, token, body))
+
+    def _search_tx(self, cur, token, body):
+        _lock_control(cur, exclusive=False)
+        principal = _authenticate(cur, token)
+        if not isinstance(body, dict):
+            raise invalid("request body must be a JSON object")
+        namespace_id = parse_uuid(body.get("namespace_id"), "namespace_id")
+        grant = _grant(cur, principal["id"], namespace_id)
+        if grant is None or not grant["can_read"]:
+            raise not_found()
+        cur.execute("SELECT g.id, g.engine_spec, g.index_profile FROM namespaces n "
+                    "JOIN generations g ON g.id = n.active_generation_id AND g.namespace_id = n.id "
+                    "WHERE n.id = %s AND g.state = 'servable'", (namespace_id,))
+        generation = cur.fetchone()
+        if generation is None:
+            raise ServiceError(503, "NO_ACTIVE_GENERATION", "검색 가능한 활성 세대가 없습니다.", retryable=True,
+                               retry_after_ms=5000)
+        return search_mod.run(cur, namespace_id, generation, body)
 
     # --- reads --------------------------------------------------------
     def get_job(self, token, job_id):

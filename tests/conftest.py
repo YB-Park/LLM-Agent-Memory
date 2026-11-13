@@ -12,6 +12,7 @@ from memory_server.config import Config  # noqa: E402
 from memory_server.db import connect  # noqa: E402
 from memory_server.migrate import migrate  # noqa: E402
 from memory_server.service import MemoryService  # noqa: E402
+from memory_server.worker import Worker  # noqa: E402
 
 HMAC_KEY = "test-only-hmac-key-0123456789abcdef-synthetic"
 
@@ -56,6 +57,10 @@ class World(object):
         self.config = config
         self.dsn = config.database_url
         self.svc = MemoryService(config)
+        # The queue is global and the session DB is shared: park jobs left over from earlier tests so this
+        # test's worker only ever sees its own jobs.
+        self.query("UPDATE jobs SET state = 'cancelled', error_code = 'TEST_LEFTOVER', lease_owner = NULL, "
+                   "lease_until = NULL, completed_at = now() WHERE state IN ('queued', 'running')")
         tag = uuid.uuid4().hex[:6]
         self.personal = admin.create_namespace(self.dsn, "personal-" + tag)
         self.work = admin.create_namespace(self.dsn, "work-" + tag)
@@ -79,6 +84,38 @@ class World(object):
 
     def submit(self, token, key, body=None):
         return self.svc.submit(token, body or self.body(), key)
+
+    def explicit(self, token, key, text, namespace_id=None, title=None, hints=None, actor="agent"):
+        sub = {"intent": "explicit_memory", "actor_reported": actor}
+        if title:
+            sub["title"] = title
+        if hints:
+            sub["retrieval_hints"] = hints
+        return self.svc.submit(token, self.body(text, namespace_id, submission=sub), key)[0]
+
+    def worker(self, name="w"):
+        return Worker(self.config, name)
+
+    def drain(self):
+        return self.worker().run_until_idle()
+
+    def search(self, token, query, namespace_id=None, **extra):
+        body = {"namespace_id": namespace_id or self.ns, "query": query}
+        body.update(extra)
+        return self.svc.search(token, body)
+
+    def job(self, job_id):
+        return self.query("SELECT * FROM jobs WHERE id = %s", (job_id,))[0]
+
+    def make_due(self, job_id):
+        self.query("UPDATE jobs SET not_before = now() WHERE id = %s", (job_id,))
+
+    def expire_lease(self, job_id):
+        self.query("UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = %s", (job_id,))
+
+    def artifacts(self, namespace_id=None, state="valid"):
+        return self.query("SELECT * FROM artifacts WHERE namespace_id = %s AND state = %s ORDER BY local_key",
+                          (namespace_id or self.ns, state))
 
     def query(self, sql, params=()):
         conn = connect(self.dsn)

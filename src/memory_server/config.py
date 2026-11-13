@@ -14,6 +14,9 @@ class Config:
     lock_timeout_ms: int = 1000
     statement_timeout_ms: int = 2000
     db_retries: int = 3
+    lease_seconds: int = 30
+    heartbeat_seconds: int = 10
+    max_job_attempts: int = 3
 
     @classmethod
     def from_env(cls):

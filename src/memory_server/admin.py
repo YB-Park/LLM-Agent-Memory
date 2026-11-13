@@ -14,12 +14,10 @@ import uuid
 from psycopg2.extras import Json
 
 from .config import Config
+from .engine import reference_spec, spec_digest
 from .db import connect
 from .service import credential_digest
-from .validation import canonical_json, sha256_hex
 
-REFERENCE_1_SPEC = {"engine": "reference", "version": "1", "input_format": "reference-input/v1",
-                    "output_format": "reference-artifact/v1", "config": {}, "model": None, "prompt": None}
 
 
 def _tx(dsn, fn):
@@ -37,15 +35,16 @@ def _tx(dsn, fn):
         conn.close()
 
 
-def create_namespace(dsn, name):
+def create_namespace(dsn, name, engine_version="1", index_profile="reference-keywords/v1"):
     """Namespace -> empty servable generation -> active pointer, in one transaction (§4.2)."""
     ns_id, gen_id = str(uuid.uuid4()), str(uuid.uuid4())
+    spec = reference_spec(engine_version)
 
     def fn(cur):
         cur.execute("INSERT INTO namespaces (id, name) VALUES (%s, %s)", (ns_id, name))
         cur.execute("INSERT INTO generations (id, namespace_id, engine_spec, spec_digest, index_profile, state, "
-                    "snapshot_ingest_revision) VALUES (%s, %s, %s, %s, 'reference-keywords/v1', 'servable', 0)",
-                    (gen_id, ns_id, Json(REFERENCE_1_SPEC), sha256_hex(canonical_json(REFERENCE_1_SPEC))))
+                    "snapshot_ingest_revision) VALUES (%s, %s, %s, %s, %s, 'servable', 0)",
+                    (gen_id, ns_id, Json(spec), spec_digest(spec), index_profile))
         cur.execute("UPDATE namespaces SET active_generation_id = %s WHERE id = %s", (gen_id, ns_id))
         cur.execute("INSERT INTO audit_events (event_type, object_ids) VALUES ('namespace_created', %s)",
                     (Json({"namespace_id": ns_id, "generation_id": gen_id}),))

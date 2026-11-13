@@ -75,3 +75,19 @@ def test_deleted_experience_410_over_rest(world, base_url):
                 "content_digest=NULL, deleted_at=now() WHERE id=%s", (doc["experience_id"],))
     assert call(base_url, "GET", "/v1/experiences/" + doc["experience_id"], world.a["token"])[0] == 410
     assert call(base_url, "POST", "/v1/experiences", world.a["token"], "d1", world.body())[0] == 410
+
+
+def test_search_over_rest(world, base_url):
+    world.explicit(world.a["token"], "rs1", "REST 검색 대상 memo_alpha")
+    world.drain()
+    st, doc, _ = call(base_url, "POST", "/v1/memories/search", world.reader["token"],
+                      body={"namespace_id": world.ns, "query": "memo_alpha"})
+    assert st == 200 and len(doc["results"]) == 1 and doc["content_trust"] == "untrusted_data"
+    assert doc["request_id"].startswith("req-")
+    st, doc, _ = call(base_url, "POST", "/v1/memories/search", world.reader["token"],
+                      body={"namespace_id": world.work["namespace_id"], "query": "memo_alpha"})
+    assert st == 404
+    st, doc, _ = call(base_url, "POST", "/v1/memories/search", world.a["token"],
+                      body={"namespace_id": world.ns, "query": "x", "keywords": []})
+    assert st == 400
+    assert call(base_url, "POST", "/v1/memories/search", None, body={})[0] == 401
