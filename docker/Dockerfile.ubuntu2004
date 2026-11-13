@@ -14,4 +14,4 @@ COPY src ./src
 COPY tests ./tests
 COPY scripts/run-tests-in-container.sh ./scripts/run-tests-in-container.sh
 
-CMD ["/app/scripts/run-tests-in-container.sh"]
+ENTRYPOINT ["/app/scripts/run-tests-in-container.sh"]

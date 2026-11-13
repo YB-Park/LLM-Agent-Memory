@@ -1,5 +1,6 @@
 #!/bin/bash
-# Runs inside the Ubuntu 20.04 image: prints the environment, starts PostgreSQL 12, runs pytest.
+# Runs inside a verification image (Ubuntu 24.04 baseline or Ubuntu 20.04 legacy):
+# prints the environment, starts the distro PostgreSQL cluster, runs pytest.
 set -euo pipefail
 
 echo "== environment =="
@@ -10,7 +11,8 @@ python3 -c 'import psycopg2, pytest; print("psycopg2", psycopg2.__version__, "| 
 pg_lsclusters
 
 echo "== starting PostgreSQL =="
-pg_ctlcluster 12 main start -o "-c ssl=off"  # slim image has no snakeoil cert; TLS is P0-5
+PGV=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+pg_ctlcluster "$PGV" main start -o "-c ssl=off"  # slim image has no snakeoil cert; TLS is P0-5
 for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
 pg_isready
 su postgres -c "psql -qAt -c \"CREATE ROLE memory SUPERUSER LOGIN PASSWORD 'memory-test'\""
