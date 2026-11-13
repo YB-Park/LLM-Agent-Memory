@@ -70,6 +70,14 @@ def _gpg(args, passphrase_file):
             passphrase_file] + args
 
 
+def _run_gpg(args, passphrase_file, stdin_bytes=None):
+    # Throwaway GNUPGHOME: the container has a read-only root and no home directory.
+    with tempfile.TemporaryDirectory(prefix="gnupg-") as home:
+        os.chmod(home, 0o700)
+        env = dict(os.environ, GNUPGHOME=home)
+        return _run(_gpg(args, passphrase_file), env, stdin_bytes)
+
+
 def _key_fingerprint(config):
     return hashlib.sha256(b"memory-hmac-key-id:" + config.hmac_key).hexdigest()[:16]
 
@@ -105,8 +113,8 @@ def backup(config, backup_database_url, out_dir, passphrase_file):
             info = tarfile.TarInfo(name)
             info.size = len(blob)
             tar.addfile(info, io.BytesIO(blob))
-    encrypted = _run(_gpg(["--symmetric", "--cipher-algo", "AES256", "--output", "-"], passphrase_file),
-                     os.environ, raw.getvalue())
+    encrypted = _run_gpg(["--symmetric", "--cipher-algo", "AES256", "--output", "-"], passphrase_file,
+                         raw.getvalue())
     path = os.path.join(out_dir, "memory-%s.tar.gpg" % time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as fh:
@@ -123,7 +131,7 @@ def _all(conn, sql, params=()):
 
 
 def _open_archive(archive, passphrase_file):
-    blob = _run(_gpg(["--decrypt", archive], passphrase_file), os.environ)
+    blob = _run_gpg(["--decrypt", archive], passphrase_file)
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r") as tar:
         manifest = json.loads(tar.extractfile("manifest.json").read())
         dump = tar.extractfile("db.dump").read()

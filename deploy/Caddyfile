@@ -1,0 +1,35 @@
+# TLS terminating reverse proxy. Only /mcp and /v1/* reach the application; health endpoints stay internal.
+# Certificates are mounted from ./certs (see docs/operations/deployment.md for dev CA, own certs or ACME).
+{
+	auto_https off
+	admin off
+}
+
+:8443 {
+	tls /certs/server.crt /certs/server.key {
+		protocols tls1.2 tls1.3
+	}
+	request_body {
+		max_size 128KB
+	}
+	@exposed path /mcp /mcp/* /v1/*
+	handle @exposed {
+		reverse_proxy api:8080 {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 35s
+			}
+		}
+	}
+	handle {
+		respond "not found" 404
+	}
+	log {
+		output stdout
+		format filter {
+			wrap json
+			request>headers delete
+			resp_headers delete
+		}
+	}
+}

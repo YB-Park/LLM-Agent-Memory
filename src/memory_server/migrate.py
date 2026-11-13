@@ -11,6 +11,10 @@ MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 _LOCK_ID = 7_340_001
 
 
+class RoleProvisionError(RuntimeError):
+    pass
+
+
 def provision_roles(cur, runtime_role=None, backup_role=None):
     """Least-privilege grants, re-applied on every run so tables added by later migrations are covered.
 
@@ -30,6 +34,15 @@ def provision_roles(cur, runtime_role=None, backup_role=None):
         cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
         cur.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}").format(role))
         cur.execute(sql.SQL("GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(role))
+    # Fail closed: PostgreSQL < 15 grants CREATE on schema public to PUBLIC, and only the schema owner (the
+    # database administrator) can revoke it. Refuse to report success while a service role can still run DDL.
+    for name in (runtime_role, backup_role):
+        if name:
+            cur.execute("SELECT has_schema_privilege(%s, 'public', 'CREATE') AS can_create", (name,))
+            if cur.fetchone()["can_create"]:
+                raise RoleProvisionError(
+                    "role %s can CREATE in schema public; the database administrator must run "
+                    "'REVOKE CREATE ON SCHEMA public FROM PUBLIC' (default on PostgreSQL < 15)" % name)
 
 
 def migrate(dsn, directory=MIGRATIONS_DIR, runtime_role=None, backup_role=None):

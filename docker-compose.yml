@@ -1,0 +1,161 @@
+# Personal single-host deployment: Caddy (TLS) -> API/MCP -> PostgreSQL, plus a separate Worker process.
+# Secrets are files under ./secrets (scripts/gen-secrets.sh); nothing sensitive lives in this file or the images.
+# Only the proxy publishes a port, bound to loopback unless MEMORY_PUBLIC_BIND is set deliberately.
+name: memory
+
+x-app: &app
+  image: llm-agent-memory:runtime
+  build: {context: ., dockerfile: docker/Dockerfile}
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  networks: [backend]
+  # Fixed addresses + /etc/hosts instead of Docker's embedded DNS: on `internal` networks that resolver did not
+  # work on the verification host (docs/operations/deployment.md), and static entries do not depend on it.
+  extra_hosts: ["db:172.29.0.5"]
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_superuser_password
+    secrets: [db_superuser_password, db_owner_password, db_app_password, db_backup_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/db/10-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+    networks:
+      backend: {ipv4_address: 172.29.0.5}   # internal network, no published port
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:                         # one-shot, schema-owner credentials; exits before api/worker start
+    <<: *app
+    restart: "no"
+    command: ["python3", "-m", "memory_server.migrate"]
+    environment:
+      MEMORY_MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      MEMORY_RUNTIME_ROLE: memory_app
+      MEMORY_BACKUP_ROLE: memory_backup
+    secrets: [migration_database_url]
+    depends_on: {db: {condition: service_healthy}}
+
+  api:
+    <<: *app
+    stop_grace_period: 30s
+    command: ["python3", "-m", "memory_server.app", "--host", "0.0.0.0", "--port", "8080",
+              "--forwarded-allow-ips", "172.28.0.2"]
+    environment:
+      MEMORY_DATABASE_URL_FILE: /run/secrets/database_url
+      MEMORY_HMAC_KEY_FILE: /run/secrets/hmac_key
+      MEMORY_ALLOWED_HOSTS: ${MEMORY_ALLOWED_HOSTS:?set the public host name(s) clients use}
+      MEMORY_ALLOWED_ORIGINS: ${MEMORY_ALLOWED_ORIGINS:-}
+      MEMORY_POLICY_LEDGER: /ledger/policy.jsonl
+      MEMORY_REQUIRE_LEDGER: "1"
+    secrets: [database_url, hmac_key]
+    volumes: [ledger:/ledger]
+    networks:
+      backend: {}
+      edge: {ipv4_address: 172.28.0.10}
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u;r=u.Request('http://127.0.0.1:8080/readyz',headers={'Host':'localhost'});u.urlopen(r,timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:                          # same code, separate process; no ledger access, no inbound port
+    <<: *app
+    stop_grace_period: 40s
+    command: ["python3", "-m", "memory_server.worker"]
+    environment:
+      MEMORY_DATABASE_URL_FILE: /run/secrets/database_url
+      MEMORY_HMAC_KEY_FILE: /run/secrets/hmac_key
+    secrets: [database_url, hmac_key]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp, /data, /config]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${MEMORY_PUBLIC_BIND:-127.0.0.1}:${MEMORY_PUBLIC_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    extra_hosts: ["api:172.28.0.10"]
+    networks:
+      edge: {ipv4_address: 172.28.0.2}
+      public: {}                     # the only network with a route out; carries just the published port
+    depends_on: {api: {condition: service_healthy}}
+
+  # --- operator tools: `docker compose --profile tools run --rm admin ...` (never started by `up`) ---
+  admin:
+    <<: *app
+    profiles: [tools]
+    restart: "no"
+    entrypoint: ["python3", "-m", "memory_server.admin"]
+    command: ["--help"]
+    environment:
+      MEMORY_DATABASE_URL_FILE: /run/secrets/database_url
+      MEMORY_HMAC_KEY_FILE: /run/secrets/hmac_key
+      MEMORY_POLICY_LEDGER: /ledger/policy.jsonl
+      MEMORY_REQUIRE_LEDGER: "1"
+    secrets: [database_url, hmac_key]
+    volumes: [ledger:/ledger]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+
+  recovery:
+    <<: *app
+    profiles: [tools]
+    restart: "no"
+    entrypoint: ["python3", "-m", "memory_server.recovery"]
+    command: ["--help"]
+    environment:
+      MEMORY_DATABASE_URL_FILE: /run/secrets/database_url
+      MEMORY_BACKUP_DATABASE_URL_FILE: /run/secrets/backup_database_url
+      MEMORY_HMAC_KEY_FILE: /run/secrets/hmac_key
+      MEMORY_POLICY_LEDGER: /ledger/policy.jsonl
+      MEMORY_REQUIRE_LEDGER: "1"
+      MEMORY_RUNTIME_ROLE: memory_app
+      MEMORY_BACKUP_ROLE: memory_backup
+    secrets: [database_url, backup_database_url, hmac_key, backup_passphrase]
+    volumes:
+      - ledger:/ledger
+      - ${MEMORY_BACKUP_DIR:-./backups}:/backups
+
+networks:
+  backend:                           # db/api/worker: no route to the outside world
+    internal: true
+    ipam: {config: [{subnet: 172.29.0.0/24}]}
+  edge:                              # proxy <-> api only; fixed address so uvicorn trusts only the proxy's X-Forwarded-For
+    internal: true
+    ipam: {config: [{subnet: 172.28.0.0/24}]}
+  public: {}
+
+volumes:
+  pgdata: {}
+  ledger: {}
+
+secrets:
+  db_superuser_password: {file: ./secrets/db_superuser_password}
+  db_owner_password: {file: ./secrets/db_owner_password}
+  db_app_password: {file: ./secrets/db_app_password}
+  db_backup_password: {file: ./secrets/db_backup_password}
+  database_url: {file: ./secrets/database_url}
+  migration_database_url: {file: ./secrets/migration_database_url}
+  backup_database_url: {file: ./secrets/backup_database_url}
+  hmac_key: {file: ./secrets/hmac_key}
+  backup_passphrase: {file: ./secrets/backup_passphrase}

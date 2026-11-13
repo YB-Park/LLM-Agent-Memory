@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 import psycopg2
 from psycopg2.extras import Json
 
-from . import hooks, ledger
+from . import hooks
 from .db import connect, run_tx
 from .engine import MAX_ARTIFACTS, MAX_OUTPUT_BYTES, EngineError, Snapshot, engine_for_spec
 from .errors import ServiceError
@@ -318,9 +318,7 @@ def main():
     parser.add_argument("--poll-interval", type=float, default=1.0)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    config = Config.from_env()
-    ledger.ensure(config.policy_ledger)
-    worker = Worker(config)
+    worker = Worker(Config.from_env())
     if args.once:
         print(json.dumps([o._asdict() for o in worker.run_until_idle()]))
     else:

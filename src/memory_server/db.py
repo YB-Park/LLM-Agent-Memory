@@ -15,8 +15,12 @@ _RETRYABLE = (
 )
 
 
+CONNECT_TIMEOUT_SECONDS = 3  # a stopped database host must fail fast (retryable 503), not hang the request
+
+
 def connect(dsn):
-    conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+    conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor,
+                            connect_timeout=CONNECT_TIMEOUT_SECONDS)
     conn.set_client_encoding("UTF8")
     return conn
 

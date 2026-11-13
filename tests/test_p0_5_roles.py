@@ -8,7 +8,7 @@ import pytest
 
 from memory_server import admin, operations
 from memory_server.config import Config
-from memory_server.migrate import migrate
+from memory_server.migrate import RoleProvisionError, migrate
 from memory_server.service import MemoryService
 from memory_server.worker import Worker
 
@@ -31,6 +31,11 @@ def role_db():
     cur.execute('CREATE DATABASE "%s" OWNER "%s" TEMPLATE template0 ENCODING \'UTF8\'' % (db, owner))
     base = admin_url.split("@", 1)[1]
     host = base.rsplit("/", 1)[0]
+    # What deploy/db/10-roles.sh does: PostgreSQL < 15 lets PUBLIC create objects in schema public by default.
+    admin_db = psycopg2.connect(admin_url.rsplit("/", 1)[0] + "/" + db)
+    admin_db.autocommit = True
+    admin_db.cursor().execute("REVOKE ALL ON SCHEMA public FROM PUBLIC; ALTER SCHEMA public OWNER TO \"%s\"" % owner)
+    admin_db.close()
 
     def dsn(role):
         return "postgresql://%s:%s@%s/%s" % (role, pw, host, db)
@@ -107,3 +112,13 @@ def test_full_service_flow_runs_under_the_runtime_role(role_db):
     assert report["status"] == "ready"
     out = gens.activate_generation(config, dev["principal_id"], g2, ns["generation_id"], report["receipt_id"])
     assert out["active_generation_id"] == g2
+
+
+def test_provisioning_fails_closed_when_public_can_create_in_schema(role_db):
+    su = psycopg2.connect(role_db["owner"])
+    su.autocommit = True
+    cur = su.cursor()
+    cur.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
+    su.close()
+    with pytest.raises(RoleProvisionError, match="CREATE in schema public"):
+        migrate(role_db["owner"], runtime_role=role_db["app_role"])
