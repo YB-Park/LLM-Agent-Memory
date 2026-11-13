@@ -358,8 +358,8 @@ def test_failed_job_after_attempt_exhaustion_can_be_retried_with_fresh_budget(wo
 # ---- surface -----------------------------------------------------------------------------
 
 def test_admin_cli_commands_and_no_public_admin_surface(world, monkeypatch, capsys):
-    import threading as th
-    from memory_server.rest import make_server
+    pytest.importorskip("starlette")  # the HTTP adapter needs the pinned ASGI stack (not in the legacy image)
+    from httpserver import RunningServer
     import urllib.error
     import urllib.request
 
@@ -373,19 +373,12 @@ def test_admin_cli_commands_and_no_public_admin_surface(world, monkeypatch, caps
         admin.main(["delete-experience", "--experience", str(uuid.uuid4())])
     assert e.value.code == 1
 
-    server = make_server(world.config, "127.0.0.1", 0)
-    t = th.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    base = "http://127.0.0.1:%d" % server.server_address[1]
-    try:
+    with RunningServer(world.config) as running:
         for method, path in (("DELETE", "/v1/experiences/" + r["experience_id"]),
                              ("POST", "/v1/admin/principals/%s/revoke" % world.a["principal_id"]),
                              ("POST", "/v1/admin/jobs/%s/retry" % r["job_id"])):
-            req = urllib.request.Request(base + path, method=method, data=b"{}",
+            req = urllib.request.Request(running.base + path, method=method, data=b"{}",
                                          headers={"Authorization": "Bearer " + world.a["token"]})
             with pytest.raises(urllib.error.HTTPError) as err:
                 urllib.request.urlopen(req)
             assert err.value.code in (404, 405, 501)  # no handler either way
-    finally:
-        server.shutdown()
-        server.server_close()

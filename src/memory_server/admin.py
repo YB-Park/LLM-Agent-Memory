@@ -3,6 +3,7 @@
 Usage: python3 -m memory_server.admin <command> [options]
   create-namespace --name NAME
   create-principal --name NAME [--kind device|admin]   (prints the token once)
+  rotate-credential --principal ID --name NEWNAME   (new principal with the same grants; the old one is revoked)
   grant --principal ID --namespace ID [--read] [--write] [--manage]
   delete-experience --experience ID          (tombstone source, invalidate derived results in all generations)
   revoke-principal --principal ID            (credential revoked, its open jobs cancelled, shared data kept)
@@ -27,7 +28,7 @@ from .config import Config
 from .errors import ServiceError
 from .engine import reference_spec, spec_digest
 from .db import connect
-from . import generations
+from . import generations, ledger
 from .operations import delete_experience, fence_principal_jobs, retry_job, revoke_principal
 from .service import credential_digest
 
@@ -80,7 +81,34 @@ def create_principal(dsn, name, kind="device"):
     return _tx(dsn, fn)
 
 
-def grant(dsn, principal_id, namespace_id, read=False, write=False, manage=False):
+def rotate_credential(config, principal_id, new_name):
+    """New credential for the same access: create a principal, copy its grants, then revoke the old one.
+
+    The old credential stays valid until the last step, so a failure part-way leaves both usable (never none
+    by accident). The revocation goes through the policy ledger, so a restored backup cannot revive it.
+    """
+    dsn = config.database_url
+    conn = connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT kind, revoked_at FROM principals WHERE id = %s", (principal_id,))
+            old = cur.fetchone()
+            cur.execute("SELECT namespace_id, can_read, can_write, can_manage FROM namespace_grants "
+                        "WHERE principal_id = %s", (principal_id,))
+            grants = cur.fetchall()
+    finally:
+        conn.close()
+    if old is None or old["revoked_at"] is not None:
+        raise ServiceError(404, "NOT_FOUND", "대상을 찾을 수 없습니다.")
+    new = create_principal(dsn, new_name, old["kind"])
+    for g in grants:
+        grant(dsn, new["principal_id"], str(g["namespace_id"]), g["can_read"], g["can_write"], g["can_manage"])
+    revoked = revoke_principal(config, principal_id)
+    return {"principal_id": new["principal_id"], "token": new["token"],
+            "revoked_principal_id": principal_id, "jobs_cancelled": revoked["jobs_cancelled"]}
+
+
+def grant(dsn, principal_id, namespace_id, read=False, write=False, manage=False, ledger_path=""):
     read = read or write or manage
     write = write or manage
 
@@ -97,6 +125,9 @@ def grant(dsn, principal_id, namespace_id, read=False, write=False, manage=False
                     "can_manage = EXCLUDED.can_manage",
                     (principal_id, namespace_id, read, write, manage))
         if reduced:
+            ledger.append(ledger_path, "grant_reduce", {"principal_id": str(principal_id),
+                                                        "namespace_id": str(namespace_id),
+                                                        "read": read, "write": write, "manage": manage})
             cur.execute("UPDATE principals SET auth_epoch = auth_epoch + 1 WHERE id = %s", (principal_id,))
             fenced = len(fence_principal_jobs(cur, principal_id))
         cur.execute("UPDATE system_control SET policy_revision = policy_revision + 1")
@@ -117,6 +148,9 @@ def main(argv=None):
     s = sub.add_parser("create-principal")
     s.add_argument("--name", required=True)
     s.add_argument("--kind", choices=["device", "admin"], default="device")
+    s = sub.add_parser("rotate-credential")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--name", required=True)
     s = sub.add_parser("grant")
     s.add_argument("--principal", required=True)
     s.add_argument("--namespace", required=True)
@@ -180,6 +214,8 @@ def _dispatch(args, config, dsn):
         return delete_experience(config, args.experience)
     if args.cmd == "revoke-principal":
         return revoke_principal(config, args.principal)
+    if args.cmd == "rotate-credential":
+        return rotate_credential(config, args.principal, args.name)
     if args.cmd == "retry-job":
         return retry_job(config, args.principal, args.job, args.expected_attempt)
     if args.cmd == "start-generation":
@@ -208,7 +244,8 @@ def _dispatch(args, config, dsn):
     elif args.cmd == "create-principal":
         out = create_principal(dsn, args.name, args.kind)
     else:
-        out = grant(dsn, args.principal, args.namespace, args.read, args.write, args.manage)
+        out = grant(dsn, args.principal, args.namespace, args.read, args.write, args.manage,
+                    config.policy_ledger)
     return out
 
 

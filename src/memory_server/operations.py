@@ -6,7 +6,7 @@ so it is totally ordered against submit, claim and finalize.
 """
 from psycopg2.extras import Json
 
-from . import hooks
+from . import hooks, ledger
 from .db import run_tx
 from .errors import ServiceError, not_found
 from .service import _grant, _lock_control
@@ -34,7 +34,7 @@ def fence_principal_jobs(cur, principal_id, code="AUTHORITY_REVOKED"):
 
 
 def lock_policy(cur):
-    _lock_control(cur, exclusive=True)
+    _lock_control(cur, exclusive=True, allow_quarantined=True)
 
 
 def bump_policy(cur):
@@ -44,10 +44,10 @@ def bump_policy(cur):
 # --- delete -------------------------------------------------------------
 def delete_experience(config, experience_id, actor_id=None):
     exp_id = parse_uuid(experience_id, "experience_id")
-    return run_tx(config, lambda cur: _delete_tx(cur, exp_id, actor_id))
+    return run_tx(config, lambda cur: _delete_tx(cur, exp_id, actor_id, config.policy_ledger))
 
 
-def _delete_tx(cur, exp_id, actor_id):
+def _delete_tx(cur, exp_id, actor_id, ledger_path=""):
     lock_policy(cur)
     cur.execute("SELECT id, namespace_id, state FROM experiences WHERE id = %s FOR UPDATE", (exp_id,))
     exp = cur.fetchone()
@@ -56,6 +56,7 @@ def _delete_tx(cur, exp_id, actor_id):
     ns_id = exp["namespace_id"]
     if exp["state"] == "deleted":
         return _delete_body(exp_id, 0, 0, already=True)
+    ledger.append(ledger_path, "delete_experience", {"experience_id": str(exp_id)})
     hooks.fire("delete_after_lock")
     cur.execute("UPDATE experiences SET state = 'deleted', raw_text = NULL, source_metadata = NULL, "
                 "content_digest = NULL, deleted_at = now() WHERE id = %s", (exp_id,))
@@ -86,10 +87,10 @@ def _delete_body(exp_id, invalidated, cancelled, already):
 # --- revoke ---------------------------------------------------------------
 def revoke_principal(config, principal_id, actor_id=None):
     pid = parse_uuid(principal_id, "principal_id")
-    return run_tx(config, lambda cur: _revoke_tx(cur, pid, actor_id))
+    return run_tx(config, lambda cur: _revoke_tx(cur, pid, actor_id, config.policy_ledger))
 
 
-def _revoke_tx(cur, pid, actor_id):
+def _revoke_tx(cur, pid, actor_id, ledger_path=""):
     lock_policy(cur)
     cur.execute("SELECT id, revoked_at FROM principals WHERE id = %s FOR UPDATE", (pid,))
     who = cur.fetchone()
@@ -98,6 +99,7 @@ def _revoke_tx(cur, pid, actor_id):
     if who["revoked_at"] is not None:
         return {"principal_id": str(pid), "revoked": True, "already_revoked": True, "jobs_cancelled": 0,
                 "shared_data": "retained"}
+    ledger.append(ledger_path, "revoke_principal", {"principal_id": str(pid)})
     cur.execute("UPDATE principals SET revoked_at = now(), auth_epoch = auth_epoch + 1 WHERE id = %s", (pid,))
     fenced = fence_principal_jobs(cur, pid)
     bump_policy(cur)

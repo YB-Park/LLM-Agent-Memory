@@ -2,3 +2,12 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .env
+
+# P0-5: never commit generated secrets, certificates, backups or ledgers
+/secrets/
+/certs/
+/backups/
+/ledger/
+*.gpg
+*.pem
+*.key

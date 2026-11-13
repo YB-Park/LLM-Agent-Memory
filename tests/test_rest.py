@@ -1,22 +1,18 @@
 """REST adapter over a real HTTP socket (§9.1, §9.2)."""
 import json
-import threading
 import urllib.error
 import urllib.request
 
 import pytest
 
-from memory_server.rest import make_server
+pytest.importorskip("starlette")  # the HTTP adapter needs the pinned ASGI stack (not in the legacy image)
+from httpserver import RunningServer  # noqa: E402
 
 
 @pytest.fixture
 def base_url(world):
-    server = make_server(world.config, "127.0.0.1", 0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield "http://127.0.0.1:%d" % server.server_address[1]
-    server.shutdown()
-    server.server_close()
+    with RunningServer(world.config) as running:
+        yield running.base
 
 
 def call(base, method, path, token=None, key=None, body=None, raw=None):

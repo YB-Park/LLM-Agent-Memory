@@ -16,9 +16,18 @@ def credential_digest(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _lock_control(cur, exclusive):
+def _lock_control(cur, exclusive, allow_quarantined=False):
+    """Serialize against policy changes; refuse service while the database is quarantined (fail closed).
+
+    Only administrator/recovery operations pass allow_quarantined=True.
+    """
     mode = "UPDATE" if exclusive else "SHARE"
-    cur.execute("SELECT policy_revision FROM system_control WHERE id = 1 FOR " + mode)
+    cur.execute("SELECT policy_revision, service_state FROM system_control WHERE id = 1 FOR " + mode)
+    row = cur.fetchone()
+    if row["service_state"] != "serving" and not allow_quarantined:
+        raise ServiceError(503, "RECOVERY_QUARANTINE", "서비스가 복구 검증 중입니다. 운영자가 해제할 때까지 사용할 수 없습니다.",
+                           retryable=True, retry_after_ms=30000)
+    return row
 
 
 def _authenticate(cur, token):
@@ -128,6 +137,16 @@ class MemoryService:
         return {"api_version": "v1", "status": "accepted", "experience_id": str(experience_id),
                 "source_version": 1, "job_id": str(job_id), "generation_id": str(generation_id),
                 "replayed": replayed, "searchability": "not_guaranteed"}
+
+    # --- authentication (transport edge) ------------------------------
+    def authenticate(self, token):
+        """Valid, unrevoked credential? Used by the HTTP edge to answer 401 before any protocol handling."""
+        return run_tx(self.config, lambda cur: self._authenticate_tx(cur, token))
+
+    @staticmethod
+    def _authenticate_tx(cur, token):
+        _lock_control(cur, exclusive=False)
+        return str(_authenticate(cur, token)["id"])
 
     # --- search -------------------------------------------------------
     def search(self, token, body):
