@@ -7,6 +7,13 @@ Usage: python3 -m memory_server.admin <command> [options]
   delete-experience --experience ID          (tombstone source, invalidate derived results in all generations)
   revoke-principal --principal ID            (credential revoked, its open jobs cancelled, shared data kept)
   retry-job --job ID --expected-attempt N --principal ID   (principal needs manage on the job's namespace)
+  start-generation --principal ID --namespace ID --expected-active ID --engine-version 1|2 [--operation-id ID]
+  generation-status --generation ID
+  compare-generation --principal ID --generation ID --queries-file FILE.json   (JSON list of up to 20 strings)
+  activate-generation --principal ID --generation ID --expected-active ID --receipt ID   (also rollback)
+  prepare-rollback --principal ID --namespace ID --generation ID --expected-active ID
+  abort-generation --principal ID --generation ID --expected-active ID
+  resume-namespace --principal ID --namespace ID --expected-active ID
 """
 import argparse
 import json
@@ -20,6 +27,7 @@ from .config import Config
 from .errors import ServiceError
 from .engine import reference_spec, spec_digest
 from .db import connect
+from . import generations
 from .operations import delete_experience, fence_principal_jobs, retry_job, revoke_principal
 from .service import credential_digest
 
@@ -123,6 +131,37 @@ def main(argv=None):
     s.add_argument("--job", required=True)
     s.add_argument("--expected-attempt", type=int, required=True)
     s.add_argument("--principal", required=True)
+    s = sub.add_parser("start-generation")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--namespace", required=True)
+    s.add_argument("--expected-active", required=True)
+    s.add_argument("--engine-version", required=True)
+    s.add_argument("--operation-id", default=None)
+    s.add_argument("--index-profile", default=None)
+    s = sub.add_parser("generation-status")
+    s.add_argument("--generation", required=True)
+    s = sub.add_parser("compare-generation")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--generation", required=True)
+    s.add_argument("--queries-file", required=True)
+    s = sub.add_parser("activate-generation")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--generation", required=True)
+    s.add_argument("--expected-active", required=True)
+    s.add_argument("--receipt", required=True)
+    s = sub.add_parser("prepare-rollback")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--namespace", required=True)
+    s.add_argument("--generation", required=True)
+    s.add_argument("--expected-active", required=True)
+    s = sub.add_parser("abort-generation")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--generation", required=True)
+    s.add_argument("--expected-active", required=True)
+    s = sub.add_parser("resume-namespace")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--namespace", required=True)
+    s.add_argument("--expected-active", required=True)
     args = p.parse_args(argv)
     config = Config.from_env()
     dsn = config.database_url
@@ -143,6 +182,27 @@ def _dispatch(args, config, dsn):
         return revoke_principal(config, args.principal)
     if args.cmd == "retry-job":
         return retry_job(config, args.principal, args.job, args.expected_attempt)
+    if args.cmd == "start-generation":
+        return generations.start_generation(config, args.principal, args.namespace,
+                                            args.operation_id or str(uuid.uuid4()), args.expected_active,
+                                            args.engine_version, args.index_profile)
+    if args.cmd == "generation-status":
+        return generations.generation_status(config, args.generation)
+    if args.cmd == "compare-generation":
+        with open(args.queries_file, encoding="utf-8") as fh:
+            queries = json.load(fh)
+        return generations.compare_generation(config, args.principal, args.generation, queries)
+    if args.cmd == "activate-generation":
+        return generations.activate_generation(config, args.principal, args.generation, args.expected_active,
+                                               args.receipt)
+    if args.cmd == "prepare-rollback":
+        return generations.prepare_rollback(config, args.principal, args.namespace, args.generation,
+                                            args.expected_active)
+    if args.cmd == "abort-generation":
+        return generations.abort_generation(config, args.principal, args.generation, args.expected_active)
+    if args.cmd == "resume-namespace":
+        return generations.resume_namespace(config, args.principal, args.namespace, args.expected_active,
+                                            args.expected_active)
     if args.cmd == "create-namespace":
         out = create_namespace(dsn, args.name)
     elif args.cmd == "create-principal":

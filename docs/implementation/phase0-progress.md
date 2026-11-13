@@ -177,3 +177,58 @@ P0-0의 Python 3.8 / PostgreSQL 12는 upstream 지원이 끝났고 공식 `mcp` 
 - Rebuild·롤백 경로에서의 삭제 재노출 방지(T6 후반, T10 일부)는 P0-4에서 확인한다. 이번에는 과거 Generation을 SQL로 active 전환하는 모사만 했다.
 - 백업/복원 후 삭제 재적용(T15)은 P0-5 범위다. `backup_erasure`는 `not_guaranteed` 그대로다.
 - 삭제 도중 프로세스 kill은 트랜잭션 원자성에 의존하며 별도 kill 시험은 하지 않았다.
+
+## 8. P0-4 — Generation, Rebuild, 비교, 전환, 롤백
+
+### 구현 항목과 모듈 책임
+
+`generations.py`(신규)가 Generation 수명주기의 유일한 구현이다. 쓰기 명령은 `system_control` exclusive 아래 한 트랜잭션이며(정책 변경과 전순서), 엔진 계산 중에는 어떤 잠금도 쥐지 않는다. 전송은 관리 CLI뿐이다(REST/MCP 미노출).
+
+| 명령 (CLI) | 동작 |
+| --- | --- |
+| `start-generation --principal --namespace --expected-active --engine-version [--operation-id] [--index-profile]` | `building` Generation 생성, 유지 중인 원본 전부를 manifest로 고정(`snapshot_ingest_revision`, `manifest_digest`)하고 원본당 Job 1개를 같은 트랜잭션에서 큐잉, write gate를 `paused`로. operation ID가 곧 Generation ID라 재호출은 `already_exists`, 다른 요청이면 409 `OPERATION_CONFLICT`. `STALE_ACTIVE`, `REBUILD_IN_PROGRESS`, `GENERATION_LIMIT`(8), `ENGINE_VERSION_UNAVAILABLE` 검사 |
+| `generation-status --generation` | 상태·엔진·gate·coverage(문제 유형별 개수와 예시 ID) |
+| `compare-generation --principal --generation --queries-file` | 최대 20개 고정 질의로 active와 candidate를 같은 검색 코드로 실행(top-5, 원본 ID 차이, 지연). 품질 판정 없음, `external_calls=0`. 1단계는 공유 잠금으로 관측하고 2단계(exclusive)에서 리비전·coverage를 재관측해 달라졌으면 최대 3회 재시도 후 409 `COMPARISON_STALE`. 양쪽 coverage가 충족될 때만 receipt를 candidate에 저장(ID·리비전·digest·개수만, 질의 본문 없음) |
+| `activate-generation ... --expected-active --receipt` | exclusive 아래에서 receipt·리비전·manifest·coverage를 다시 검증한 뒤 포인터 전환, 기존 active는 `retired`(+`retired_ingest_revision`). 같은 receipt 재호출은 `already_applied`. **gate는 `paused`로 유지**(운영자가 확인 후 `resume-namespace`) |
+| `resume-namespace` | 전환 완료 후 접수를 다시 연다. candidate가 남아 있으면 409 `CANDIDATE_PENDING` |
+| `abort-generation` | building candidate를 `aborted`로, 그 Job을 `cancelled(GENERATION_ABORTED)`로 fence하고 gate를 다시 연다. 롤백용으로 준비한 retired 세대는 retired로 남긴다. active는 중단 불가 |
+| `prepare-rollback --generation --expected-active` | retired 세대를 candidate로 지정. 그 세대가 퇴역한 뒤 접수된 원본이 있으면(`ingest_revision` 변화) 409 `ROLLBACK_REBUILD_REQUIRED` — 이전 엔진 버전으로 `start-generation`을 다시 해야 한다. 이후는 `compare-generation` → `activate-generation`과 동일 |
+
+핵심 규칙
+
+- **coverage는 ID 집합의 양방향 검사**다(개수 비교가 아님). 유지 중인 원본마다 버전·digest가 맞는 성공 Job이 있어야 하고, explicit은 유효 artifact 정확히 1개, projection은 1개 이상, `output_count`와 일치, 모든 artifact에 해당 원본을 인용하는 source가 있어야 한다. 실패·취소·0건 출력·source 없음은 전환을 막는다. 삭제된 원본의 Job은 제외한다.
+- 삭제·철회는 **모든 Generation에 적용**되고 `policy_revision`을 올려 이전 receipt를 무효화한다. 롤백·재활성화한 과거 세대에도 최신 정책이 유지된다(시험).
+- 롤백은 포인터 변경만으로 새 원본을 누락시키지 않는다. 포인터 롤백은 입력이 없었을 때만 허용하고 전환 시점에도 `retired_ingest_revision`을 다시 검사한다.
+
+### 실제 실행한 시험 (`tests/test_p0_4_generations.py`, 31 cases)
+
+24.04 / Python 3.12 / PG16, 전체 **147 passed** (기존 116 변경 없음 + P0-4 31). 레거시(20.04 / Python 3.8.10 / PG12)에서도 **147 passed**(P0-4 코드의 3.8 호환 확인). 새 시험은 3회 반복해 flaky가 없음을 확인했다. 경합·장애 시험은 별도 연결·스레드와 hook 예외 주입이다.
+
+| 설계 시험 | 시나리오 | 결과 |
+| --- | --- | --- |
+| T9 | manifest = 유지 원본 집합(삭제된 것 제외), 시작 직전 접수분 포함, pause 중 접수는 503 `INGEST_PAUSED`이며 원본·receipt·Job 미생성, 기존 receipt 재생은 유지 | 통과 |
+| T10 | 같은 원본을 reference/1·2로 처리, Generation별 결과 분리(전환 전 검색은 G1만), ID 집합 coverage, 실패·취소·source 없음·무효 artifact 차단, 미완료 candidate는 receipt 없음 | 통과 |
+| T11 | 비교 receipt가 삭제·철회·결과 변경 후 stale, 비교 중간 변경 재시도, 전환 중 삭제 경합(삭제가 대기 후 새 세대에도 적용), 잘못된 `expected_active`·남의 receipt·manage 없음 거부 | 통과 |
+| T12 | start/activate 커밋 직전 예외 → G1 유지·부분 상태 없음, 다른 OS 프로세스와 새 service/worker 객체에서 상태 복구, gate 자동 개방 없음, 응답 유실 후 같은 activate 재호출 `already_applied`, abort 후 G1 접수 재개, Worker 사망 후 재시도 수렴, 철회된 manager의 Job은 다른 manager의 `retry-job`으로 복구 | 통과 |
+| T13 | 입력 없는 롤백은 새 비교 후 전환, 새 원본 접수 후 롤백은 거절되고 이전 엔진으로 재구축한 세대에 새 원본 포함, 전환 시점에 `ingest_revision` 재검사, 엔진 코드 없는 세대 거절 | 통과 |
+| T19 | 재구축·롤백 후 삭제된 기억이 다시 검색되지 않음 | 통과 |
+
+### 설계와 달라진 점 / 판단
+
+- **Rebuild Job의 권한**: 설계는 원 생성자 권한을 암시했으나, 생성 기기가 철회되면 그 원본은 영영 재구축할 수 없다. 재구축 Job은 시작한 manage principal의 권한·`auth_epoch`로 만든다. 그 principal이 이후 철회·축소되면 Job이 fence되어 coverage가 실패하고 다른 manager가 `retry-job`으로 넘겨받는다(시험).
+- Generation 한도 8은 상태와 무관하게 모든 행을 센다. Phase 0에는 GC가 없어서 단순하게 했다.
+- 전환 후 gate를 자동으로 열지 않고 `resume-namespace`를 별도 명령으로 뒀다(전환 직후 검색 확인 구간).
+- 비교는 품질 판정을 하지 않는다. 같은 질의의 원본 ID 차이·개수·지연만 보여 준다.
+- 관리 전송은 CLI뿐이다.
+
+### 아직 검증하지 못한 것
+
+- 실제 `kill -9`에 의한 중단은 시험하지 않았다. 커밋 직전 예외 주입과 별도 프로세스 재조회로 대체했다.
+- 대규모 데이터에서의 Rebuild 시간·coverage 쿼리 비용은 측정하지 않았다(시험은 소수 원본).
+- 비교 report의 사람 가독성, 검색 품질 평가(회상률)는 범위 밖이다.
+- MCP/TLS/백업·복원(T15/T16)/실제 20.04 호스트는 P0-5.
+
+### 남은 이슈
+
+- 롤백 불가 조건(`ingest_revision` 불일치)은 삭제만 있었어도 보수적으로 막는다. 이는 안전 쪽 선택이다.
+- 비교·coverage가 전체 원본을 한 트랜잭션에서 읽는다. 원본이 수만 건이 되면 배치화가 필요하다.
