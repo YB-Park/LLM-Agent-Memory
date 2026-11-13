@@ -8,9 +8,10 @@ LLM 모델이나 Agent Harness에 종속되지 않는 **개인용 장기 에이�
 
 ## 설계 문서
 
-- **[Architecture v0.1 — 설계 초안](docs/architecture/v0.1.md)**: 시스템 경계, MCP/REST, 서버·DB·Worker 기준안, Write/Read/Rebuild 흐름, 미결정 사항 및 다른 LLM을 위한 핸드오프
+- **[Architecture v0.1 — 상위 아키텍처 초안](docs/architecture/v0.1.md)**: 시스템 경계, MCP/REST, 서버·DB·Worker 기준안, 불변조건과 미결정 사항
+- **[MVP Contracts v0.1 — 구체화 설계 초안](docs/design/mvp-contracts-v0.1.md)**: 수직 경로, 원본·Job·Memory·Generation 상태, Write/Read/Worker/Rebuild 계약 후보 및 검증 시나리오
 
-설계 초안은 `docs/architecture/`에서 관리합니다. 현재 버전은 수시로 수정할 수 있으며, 큰 설계 변경이 발생하면 `v0.2.md` 등 새 버전 문서를 추가하고 이 README의 링크를 갱신합니다. 이전 버전은 기록으로 남깁니다.
+상위 아키텍처는 `docs/architecture/`, 세부 설계 초안은 `docs/design/`에서 관리합니다. 각 문서는 변경 가능하며 큰 설계 변경이 발생하면 새 버전 문서를 추가하고 이 README의 링크를 갱신합니다. 이전 버전은 기록으로 남깁니다.
 
 ## 프로젝트 진행 방향
 
