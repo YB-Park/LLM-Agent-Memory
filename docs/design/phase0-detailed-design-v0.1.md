@@ -5,7 +5,7 @@
 > 상위 문서: [Architecture v0.1](../architecture/v0.1.md) · [MVP Contracts v0.1](mvp-contracts-v0.1.md)  
 > 설계 선택·상위 원본 저장 대안 검토: [Issue #4](https://github.com/YB-Park/LLM-Agent-Memory/issues/4)
 
-**Reference Engine 보완:** PR #5의 `24e070e` 문서와 Issue #4를 다시 확인한 뒤, 사용자의 추가 요구에 따라 2026-11-13에 보완했다. Phase 0는 기반 시스템 검증에 더해 **명시적 기억의 저장·세션 간 회상에 쓸 최소 Reference Engine**을 목표로 한다. 이는 구현/실사용 검증 완료를 뜻하지 않는다. 상위 문서는 수정하지 않으며, 기존 잠금·lease·Generation 전환 절차는 유지한다.
+**Reference Engine 구현 기준선:** Phase 0는 명시적 기억의 저장·세션 간 회상이 가능한 최소 Reference Engine을 포함한다. 최종 정합 과정에서 **실제 `evidence_refs` 연결은 Phase 0 범위 밖으로 보류**하고 수동 정정을 명시했다. 기존 잠금·lease·Generation 전환 절차는 유지한다. 구현·실사용 검증 완료를 뜻하지 않는다.
 
 ## 1. 검토 기준과 결론
 
@@ -29,11 +29,11 @@
 | 등급 | 내용 |
 | --- | --- |
 | **R — 확인된 요구/원칙** | Experience와 Memory 분리, MCP 외부화, 출처·처리 버전, 보존된 원본의 재처리·비교, 범위 격리, 삭제 후 재노출 차단, 단순한 개인 시스템, 명시적 저장·세션 간 회상을 제공하고 Phase 1에도 보존할 Reference Engine, 이번 작업은 설계만 |
-| **P — 이번 문서의 잠정 선택** | 텍스트 원본 PostgreSQL 저장, 하나의 작은 내부 엔진 함수, SQL Job Queue, 단일 공통 잠금, 명시적 입력 정지, 기존 4개 MCP 도구, 제출 메타데이터·다중 키워드 검색, 관리자 경로 분리 |
+| **P — Phase 0 구현 기준안(변경 가능)** | 작은 텍스트 PostgreSQL 저장, 작은 내부 엔진 함수, SQL Job Queue, 단일 공통 잠금, 명시적 입력 정지, 기존 4개 MCP 도구, 제출 메타데이터·다중 키워드 검색, 관리자 CLI, 실제 `evidence_refs` 연결 보류 |
 | **A — 미검증 가정** | 작은 데이터와 짧은 중단으로 충분, DB 단순 검색의 실험 비용 허용, 선택할 MCP SDK와 Copilot의 인증 설정 호환, 지정 호스트에서 컨테이너 실행 가능 |
 | **O — 구현/배포 전 결정 필요** | 원본 DB 저장 대안 채택, 입력 정지 허용 시간, 언어/SDK/런타임 버전, 인증 연결 프로필, 실제 호스트, 백업 보존·복구 목표 |
 
-P는 버전 변경 가능한 설계 선택이다. 특히 Architecture §3의 **로컬 파일 원본 저장 후보를 Phase 0의 작은 텍스트에 한해 PostgreSQL로 바꾸는 안**은 리뷰 이슈에서 먼저 제안한다. 기존 README/Architecture/MVP Contracts는 이 문서로 자동 개정하지 않는다. 이 대안이 거절되면 §4의 외부 원본 저장 계약을 먼저 상세화한 새 문서 버전이 필요하다.
+P는 **이번 Phase 0 구현을 시작하기 위해 채택한 기준안**이며 이후 단계의 영구적인 제약은 아니다. Architecture의 원본 저장 후보는 **Phase 0의 작은 텍스트에 한해 PostgreSQL 저장으로 구체화**한다. 대용량·첨부파일 저장은 나중에 별도 설계한다. 호스트·클라이언트 호환성과 운영 보안·복구 보장은 P0-0 이후 실제 시험이 필요하다.
 
 ## 2. Phase 0의 범위와 성공 의미
 
@@ -64,9 +64,8 @@ P는 버전 변경 가능한 설계 선택이다. 특히 Architecture §3의 **�
 | `actor_reported` | `user` / `agent` / `unknown`(기본); 클라이언트가 주장한 제출자 종류 |
 | `title` | 선택, 120 Unicode scalar 이하; 본문을 대체하지 않는 검색/표시용 제목 |
 | `retrieval_hints` | 선택, 최대 8개, 각각 64 scalar 이하의 비어 있지 않은 문자열; 제출자가 제공한 별칭/검색어 |
-| `evidence_refs` | explicit_memory에만 선택, 최대 8개; 기존 Experience ID/version 및 선택적 UTF-8 byte span |
 
-기존 전체 요청/메타데이터 크기 제한도 함께 적용한다. intent/제목/힌트/근거/actor는 생성 후 불변이며 request digest와 Job input digest에 포함한다. 같은 키의 의도나 힌트만 달라져도 409다. 수정은 새 Experience 제출이며 자동 supersede·모순 해결을 하지 않는다. 생략과 명시적 기본값은 canonical 입력에서 같게 처리한다.
+기존 전체 요청/메타데이터 크기 제한도 함께 적용한다. intent/제목/힌트/actor는 생성 후 불변이며 request digest와 Job input digest에 포함한다. 같은 키의 의도나 힌트만 달라져도 409다. 수정은 새 Experience 제출이며 자동 supersede·모순 해결을 하지 않는다. 생략과 명시적 기본값은 canonical 입력에서 같게 처리한다. **`evidence_refs`는 미지원 필드로 거절한다.**
 
 ### 2.2 Reference 결과와 신뢰의 의미
 
@@ -77,21 +76,25 @@ P는 버전 변경 가능한 설계 선택이다. 특히 Architecture §3의 **�
 
 실제 인증된 호출자는 기존 `created_by` principal이다. 사용자/에이전트 구분은 `actor_reported`로 별도 보관하고 `actor_basis=client_reported`로 반환한다. Copilot이 사용자 요청을 대신 제출해도 actor_reported는 agent다. 기기 토큰을 인증했다고 본문의 진실성이나 사용자의 확인까지 인증한 것은 아니다. 클라이언트가 user라고 보내도 `user_verified=true`로 승격하지 않으며 Phase 0에는 사실 검증/승인 API가 없다.
 
-원본 제출 Experience 자체는 항상 provenance다. **명시적 기억의 자기 출처만 있다는 이유로 추가 근거가 연결됐다고 하지 않는다.** 검증된 evidence_refs가 있으면 `evidence_status=source_linked`, 없으면 `no_source_linked`로 표시한다. URL/session 문자열만 적은 `source_ref`는 locator 주장으로 유지하며 source_linked로 올리지 않는다. source_linked도 “서버에 보존된 원본으로 연결됨”이지 “원본이 이 주장을 입증함”이 아니다. Source Projection은 primary 원본이 직접 출처이며 추가 진술 근거 평가는 해당하지 않으므로 evidence_status=not_applicable이다. Explicit Memory의 `verification=not_verified`, Source Projection의 `verification=not_assessed`를 구분한다.
+제출된 Experience 자체는 항상 provenance다. **명시적 기억의 자기 출처만 있다는 이유로 별도의 검증된 근거가 있다고 주장하지 않는다.** Phase 0 Explicit Memory는 `evidence_status=no_source_linked`, `verification=not_verified`로 반환한다. URL/session 문자열 등의 `source_ref`는 클라이언트가 주장한 비검증 위치 정보(locator)일 뿐이다. Source Projection은 직접 원본 투영이므로 `evidence_status=not_applicable`, `verification=not_assessed`로 구분한다.
 
 이 구분과 제목·검색 진단은 Reference 소유 `payload_schema=reference-artifact/v1`의 payload와 응답 `engine_data`에 둔다. 공통 Artifact에 explicit/observation/opinion 같은 enum 컬럼이나 별도 Memory 테이블을 추가하지 않는다. 공통 계층은 식별자·출처·권한·처리 버전·세대·생명주기만 해석하고, attribution/evidence 표시는 저장된 제출 기록과 실제 provenance로 조립한다. 엔진이 임의로 “사용자 검증 완료”를 출력해도 신뢰 증거가 되지 않는다.
 
-### 2.3 선택적 실제 근거 연결: 범위를 작게 제한한다
+### 2.3 Phase 0에서는 실제 근거 연결을 보류한다
 
-Phase 0 evidence_refs는 **같은 namespace의 retained 일반 Experience**만 가리킬 수 있다. 다른 Explicit Memory·Artifact·다른 namespace는 거절한다. 따라서 근거 의존성은 일반 원본 → 명시적 제출의 한 단계뿐이며 순환·재귀 그래프를 만들지 않는다. 서버는 접수 트랜잭션에서 권한/ID/version/span을 확인하고 없거나 접근 불가하면 같은 404를 반환한다. 존재하지만 이 프로필에서 지원하지 않는 근거 유형은 400 `UNSUPPORTED_EVIDENCE_TYPE`다. 일반 Experience에는 evidence_refs를 허용하지 않는다.
+**결정:** `submission.evidence_refs`처럼 별도 Experience와의 실제 의존 관계를 생성하는 기능은 Phase 0에서 **구현하지 않는다**. 입력에 있으면 400 계열 유효성 오류로 거절한다. `source_ref`·`session_ref`는 비검증 locator로 보관할 수 있지만, 원본 내용에 의해 진술이 입증됐다고 표시하지 않는다.
 
-Job의 primary Experience는 여전히 하나다. Worker 입력에는 그 snapshot과 서비스가 확인한 evidence handle(ID/version/span/digest)을 추가한다. 엔진이 근거 본문을 읽어 의미 판단할 필요는 없다. finalize는 기존 잠금 아래 **primary와 모든 evidence의 현재 상태**를 확인하고, 서비스가 이 전체 집합을 기존 artifact_sources에 반드시 기록한다. “제출 문구 자체”와 “추가 근거” 역할은 Reference payload에만 표현한다. 새 dependency/Job-input 테이블은 없다.
+Explicit Memory는 문구를 제출한 **자기 Experience 하나만** primary provenance로 갖는다. 독립적으로 저장된 일반 Experience의 삭제가 같은 내용을 가진 Explicit Experience의 **자동 삭제를 유발하지 않는다**. 민감정보 제거처럼 둘 다 삭제해야 하는 경우 관리자는 각각을 삭제해야 한다. 향후 실제 근거 연결을 도입할 때 권한·삭제·재처리 의존성 정책을 설계한다. `artifact_sources`의 다대다 저장 가능성은 미래를 위해 유지하지만 현재 Reference Engine의 결과는 자신의 primary 원본만 참조한다.
 
-**삭제 시 새로 필요한 제안:** 근거 원본을 삭제하면 그것에 연결된 Explicit Experience도 같은 삭제 집합에 포함해 tombstone 처리하고 원문/제목/힌트를 지운다. 그 집합의 Job과 모든 세대 Artifact에는 기존 삭제 규칙을 적용한다. 단순히 근거 링크만 떼거나 이후 Rebuild에서 근거 없는 기억으로 바꿔 재노출하지 않는다. 반대로 Explicit Experience를 삭제해도 근거 원본은 삭제하지 않는다. 클라이언트에는 이 연결 삭제 의미를 제출 도구 설명과 삭제 결과의 영향 개수로 알린다.
+### 2.4 명시적 기억의 수동 정정·삭제
 
-이는 **Reference 입력의 선택적 근거 연결에 대한 보수적인 정책 제안**이며, 원본을 보존한 채 파생 기억만 삭제하는 별도 수명주기를 만들지 않기 위한 선택이다. 근거가 없어진 명시적 제출을 보관하되 영구 차단하는 대안은 추가 상태·조회/재처리 예외가 필요하므로 보류한다. 소유자가 이 연결 삭제 정책을 수용하지 않으면 evidence_refs 지원을 먼저 보류하고 locator-only/no_source_linked로 제한하는 대안을 PR에서 결정한다. 근거 없는 Explicit Memory 자체는 계속 지원 가능하다.
+자동 supersession·모순 해결, 인플레이스 수정 API는 Phase 0 범위 밖이다. 잘못된 명시적 기억을 수정하려면 다음 절차를 수행한다.
 
-최대 1,000 원본의 범위에서 `source_metadata.submission.evidence_refs`를 역조회하여 삭제 집합을 계산한다. 아직 Artifact가 없는 queued Job도 primary ID를 통해 취소한다. 같은 control 잠금을 사용하므로 연결 제출과 근거 삭제 중 먼저 커밋한 순서가 적용된다. 이미 deleted인 원본을 다시 근거로 제출할 수 없다. 이 제한은 Reference Engine의 초기 입력 정책이며 미래 엔진의 출처 모델을 한 단계로 고정하는 DB 제약은 아니다.
+1. 잘못된 문구의 `experience_id`를 확인한다.
+2. **관리자 CLI**로 해당 Experience를 삭제한다. 삭제 완료 후 활성·과거 세대와 Rebuild에서 이전 문구가 재노출되지 않아야 한다.
+3. 올바른 문구를 `intent=explicit_memory`로 **새 Experience/새 멱등성 키**로 제출한 뒤 Job 완료와 활성 세대 검색을 확인한다.
+
+이것은 **원자적 수정이 아니다**. 삭제와 새 기억 검색 가능 사이에 기억 공백이 생길 수 있다. 자동 `superseded` 관계를 만들거나 기존 ID를 재사용하지 않는다. 관리자용 삭제를 일반 MCP에 노출하지 않는다. 수동 정정이 빈번해지면 사용자가 직접 수행할 수 있는 정정/대체 기능을 별도 설계한다.
 
 ## 3. 컴포넌트와 최소 인터페이스
 
@@ -112,29 +115,29 @@ Job의 primary Experience는 여전히 하나다. Worker 입력에는 그 snapsh
 | `get_job(auth, job_id)` / `get_experience(auth, id)` | 현재 권한에 따른 상태/원본; 이전 접수 응답의 검색 가능 여부를 재사용하지 않음 |
 | `search(auth, query, keywords?, namespace, limit, max_chars)` | `SearchResult`; 일반 호출은 활성 세대만, 검색 프로필은 세대 설정 |
 | `claim(worker_id)` / `heartbeat(job_id, attempt)` | 만료 시각과 단조 증가 `attempt`; Worker 시계 대신 DB 시각 |
-| `build(source_batch, engine_spec)` | `ArtifactDraft[]`; primary snapshot 1개와 선택적 evidence handles, 결과 0..N을 허용하는 내부 계약 |
+| `build(source_batch, engine_spec)` | `ArtifactDraft[]`; primary snapshot 1개만, 결과 0..N을 허용하는 내부 계약 |
 | `finalize(job_id, attempt, drafts)` | 원자적 성공 또는 안전한 거절; engine이 돌려준 권한/ID를 신뢰하지 않음 |
 | 관리자 `delete`, `retry_job`, `start_rebuild`, `compare`, `activate`, `resume`, `abort` | 동일 서비스의 별도 관리 권한; 일반 MCP에 등록하지 않음 |
 
-`SourceSnapshot`은 ID/version/namespace/원문/수신 시점/출처 메타데이터와 §2.3의 검증된 evidence handles를 포함한다. `EngineSpec`은 engine 이름·버전·코드 빌드 식별자·입출력 형식 버전·canonical config와 hash·index profile을 포함한다. Phase 0의 model/prompt 값은 `null`이다. 엔진 버전 문자열만 바꾸지 않고 같은 이름에 다른 구현을 덮어쓰는 것을 금지한다.
+`SourceSnapshot`은 ID/version/namespace/원문/수신 시점/출처 메타데이터를 포함한다. `EngineSpec`은 engine 이름·버전·코드 빌드 식별자·입출력 형식 버전·canonical config와 hash·index profile을 포함한다. Phase 0의 model/prompt 값은 `null`이다. 엔진 버전 문자열만 바꾸지 않고 같은 이름에 다른 구현을 덮어쓰는 것을 금지한다.
 
-`ArtifactDraft`는 `local_key`, `payload_schema`, `payload`, `display_text`, `search_text`, `source_refs[]`를 받는 Phase 0 내부 envelope다. source ref는 primary 또는 검증된 evidence handle의 ID/version과 선택적 `[start_byte,end_byte)`를 참조한다. 서비스가 namespace, generation, job, artifact ID를 부여하고 출처 집합·구간·출력 한도를 검사하며 §2.3의 필수 provenance를 누락시키지 않는다. 중복 local_key나 없는 원본 참조는 영구 오류다. display/search_text는 초기 검색 어댑터의 편의 표현이며 모든 미래 기억의 필수 모델이 아니다. 다른 엔진이 Narrative/Observation/Opinion/Atomic 구조를 쓰면 payload/schema와 검색 어댑터를 바꿀 수 있다.
+`ArtifactDraft`는 `local_key`, `payload_schema`, `payload`, `display_text`, `search_text`, `source_refs[]`를 받는 Phase 0 내부 envelope다. source ref는 자기 primary Experience의 ID/version과 선택적 `[start_byte,end_byte)`를 참조한다. 서비스가 namespace, generation, job, artifact ID를 부여하고 출처 집합·구간·출력 한도를 검사하며 primary provenance를 누락시키지 않는다. 중복 local_key나 없는 원본 참조는 영구 오류다. display/search_text는 초기 검색 어댑터의 편의 표현이며 모든 미래 기억의 필수 모델이 아니다. 다른 엔진이 Narrative/Observation/Opinion/Atomic 구조를 쓰면 payload/schema와 검색 어댑터를 바꿀 수 있다.
 
 한 Job 출력은 최대 256 Artifact, 직렬화된 draft 총량 1 MiB로 제한한다. reference/2의 Source Projection에서 문단 수가 이를 넘으면 `OUTPUT_LIMIT`으로 실패시키고 조용히 일부만 저장하지 않는다. 빈 줄은 LF 또는 CRLF의 빈 행이며 원문은 정규화하지 않고 원래 UTF-8 바이트 구간을 유지한다. 문단별 local_key는 원래 순서의 0부터 시작하는 정수 문자열이다. Explicit Memory는 local_key=`0`의 단일 결과다. 이 제한도 실험용 설정이다.
 
 **Experience/Memory 분리만으로 교체 가능성이 충분하지 않다.** 입력 보존·정확한 출처·버전 설정·독립된 결과 수명·검색 표현과 공개 단위·삭제 권한이 함께 분리되어야 한다. 실제 두 번째 엔진이 나타나면 검색 모듈/엔진 전용 테이블을 추가할 수 있다. 그때 필요한 변경을 허용하는 것이 목표이며, 지금 모든 엔진이 동일 함수로 무수정 교체된다고 약속하지 않는다.
 
-향후 통합은 여러 출처, 상태를 읽는 작업, 기억 간 관계가 필요할 수 있다. 그래서 출처는 다대다로 두지만 Phase 0의 Job은 primary 원본 하나와 제한된 근거 참조만 다룬다. 미래에 `job_inputs`나 엔진 전용 상태가 필요하면 추가한다. 접근 기록·사용 피드백·시간 경과에 따라 변하는 기억은 원본만으로 과거 상태를 재현할 수 없다. 그런 엔진을 채택할 때 입력 사건/시계/설정 snapshot의 보존 계약을 추가하며, 지금 범용 event sourcing을 만들지 않는다. **법적/사용자 삭제와 알고리즘상 망각은 별개**이며 Phase 0에서 망각을 원본 삭제로 구현하지 않는다.
+향후 통합은 여러 출처, 상태를 읽는 작업, 기억 간 관계가 필요할 수 있다. 그래서 출처는 다대다로 두지만 Phase 0의 Job과 Artifact는 자기 primary 원본 하나만 다룬다. 미래에 `job_inputs`나 엔진 전용 상태가 필요하면 추가한다. 접근 기록·사용 피드백·시간 경과에 따라 변하는 기억은 원본만으로 과거 상태를 재현할 수 없다. 그런 엔진을 채택할 때 입력 사건/시계/설정 snapshot의 보존 계약을 추가하며, 지금 범용 event sourcing을 만들지 않는다. **법적/사용자 삭제와 알고리즘상 망각은 별개**이며 Phase 0에서 망각을 원본 삭제로 구현하지 않는다.
 
 ### 3.1 이번 보완의 변경 범위
 
 | 계층 | 변경할 계약 | 유지할 부분 |
 | --- | --- | --- |
-| Adapter / Application | submission/keywords 검증, 근거 연결·신뢰 표시, 멱등성 입력 범위 확장 | URL·MCP 도구 4개, accepted 응답 의미 |
-| Worker / Engine | primary+evidence handles, intent별 결과 생성, Reference payload | attempt/lease, 트랜잭션 밖 계산, 원자적 finalize |
+| Adapter / Application | submission/keywords 검증, 제출자 주장·locator 표시, 멱등성 입력 범위 확장 | URL·MCP 도구 4개, accepted 응답 의미 |
+| Worker / Engine | primary snapshot, intent별 결과 생성, Reference payload | attempt/lease, 트랜잭션 밖 계산, 원자적 finalize |
 | Storage | 기존 source_metadata/payload JSON 형식과 input digest, 기존 artifact_sources 활용 | **테이블·컬럼 추가 없음**, 상태 enum·활성 포인터 유지 |
 | Retrieval | 세대별 keyword profile와 제목/힌트, engine_data/일치 이유 | 권한 필터·삭제 유효성, 원본 fallback 없음 |
-| 삭제 / Rebuild | §2.3의 근거 연결 삭제 집합, 두 reference 버전과 검색 fixture | 잠금 순서·입력 gate·coverage·전환/롤백 절차 |
+| 삭제 / Rebuild | primary Experience 삭제·§2.4 수동 정정, 두 reference 버전과 검색 fixture | 잠금 순서·입력 gate·coverage·전환/롤백 절차 |
 
 ## 4. 논리 모델과 PostgreSQL 스키마 후보
 
@@ -269,7 +272,7 @@ sequenceDiagram
 ```
 
 - 키는 필수, 1~128 ASCII 문자. 범위는 **principal + namespace + key**다. 다른 기기나 다른 키로 같은 원문을 제출하면 별도 경험이다. 콘텐츠 hash 전역 dedup은 하지 않는다.
-- request digest는 API 버전, namespace, 정확한 원문, 허용된 출처와 submission 전체의 canonical JSON으로 계산한다. JSON 키 순서는 무시하지만 본문 공백/줄바꿈/Unicode는 보존한다. 서버 시각·request_id·Authorization은 제외한다. Job input digest에는 primary 본문·이 메타데이터·검증된 evidence ID/version/digest를 포함한다.
+- request digest는 API 버전, namespace, 정확한 원문, 허용된 출처와 submission 전체의 canonical JSON으로 계산한다. JSON 키 순서는 무시하지만 본문 공백/줄바꿈/Unicode는 보존한다. 서버 시각·request_id·Authorization은 제외한다. Job input digest에는 primary 본문·이 메타데이터를 포함한다.
 - 권한 확인 → 기존 receipt 확인 → 신규 요청에만 write gate/용량 확인 순서다. pause 중에도 기존 접수의 재확인은 가능하다. receipt UNIQUE와 트랜잭션이 동시 중복을 막는다.
 - 최초 REST는 202, 동일 접수 재요청은 200 `replayed=true`다. receipt는 초기 접수 사실만 재현하며 현재 상태는 별도 Job 조회다. 원본이 삭제됐다면 권한 있는 호출에 410 `EXPERIENCE_DELETED`, 새 Job은 만들지 않는다.
 - commit 결과가 불명확한 네트워크 오류에는 실패로 확정하거나 새 키를 권하지 않는다. 같은 키로 재시도하도록 안내한다. receipt/tombstone은 Phase 0 동안 만료시키지 않는다. 향후 보존 기간을 줄이면 중복 재접수 허용 시점을 계약 변경으로 다룬다.
@@ -312,7 +315,7 @@ sequenceDiagram
     Note over W,D: If finalize locks first, delete waits, then removes its outputs
 ```
 
-삭제는 한 짧은 DB 트랜잭션으로 (1) 원본 tombstone과 원문/민감 출처 필드 제거, (2) provenance 역참조로 **모든 세대**의 관련 Artifact 전체 무효화와 payload/display/search 제거, (3) 관련 비종료 Job cancelled·attempt 증가·lease 제거, (4) policy_revision 및 해당 세대 result_revision 증가, (5) 원문 없는 audit 기록을 수행한다. 선택적 evidence_refs를 지원하는 경우 **메타데이터를 지우기 전에 §2.3의 삭제 집합을 계산**하여 이 동일 절차에 넣는다. 제목/힌트/engine_data도 payload와 함께 지운다. 일부 출처만 끊고 결합 Memory 본문을 남겨두지 않는다. 이미 succeeded인 Job은 역사적 성공을 유지하되 결과 유효성은 false가 된다.
+삭제는 한 짧은 DB 트랜잭션으로 (1) 원본 tombstone과 원문/민감 출처 필드 제거, (2) provenance 역참조로 **모든 세대**의 관련 Artifact 전체 무효화와 payload/display/search 제거, (3) 관련 비종료 Job cancelled·attempt 증가·lease 제거, (4) policy_revision 및 해당 세대 result_revision 증가, (5) 원문 없는 audit 기록을 수행한다. 다른 독립 Explicit Experience를 자동 연쇄 삭제하지 않는다. 필요하면 §2.4에 따라 별도 삭제한다. 제목/힌트/engine_data도 payload와 함께 지운다. 일부 출처만 끊고 결합 Memory 본문을 남겨두지 않는다. 이미 succeeded인 Job은 역사적 성공을 유지하되 결과 유효성은 false가 된다.
 
 안전한 DB 조회에서 콘텐츠를 제거했다는 뜻이지 디스크 page/WAL/백업의 물리 바이트 삭제 완료가 아니다. API는 `visibility=hidden`, `operational_payload=redacted`, `backup_erasure=not_guaranteed`를 구분한다. 삭제가 timeout/rollback되면 완료 응답을 주지 않는다. Phase 0 한도에서 이 트랜잭션이 너무 길면 규모 제한을 줄이거나 후속 설계에서 tombstone 즉시 차단 + 비동기 purge를 분리한다.
 
@@ -430,7 +433,7 @@ Generation은 활성 상태일 때 신규 Job으로 성장하는 **엔진 배포
 
 REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit은 `idempotency_key` 인자를 받아 같은 서비스에 넘긴다. principal/engine/generation 지정은 일반 제출 입력에 허용하지 않는다. MCP JSON-RPC request ID와 업무 멱등성 키는 다르다. 장시간 engine 실행을 MCP 호출 안에서 기다리지 않고 자체 Job을 polling한다. MCP의 별도 task 확장 구현은 Phase 0 필수가 아니다.
 
-추가 입력은 submit의 선택적 `submission`, search의 선택적 `keywords`뿐이다. `memory_submit` 설명에 일반 원본 기록과 명시적 기억 보존의 차이, actor_reported의 의미, 근거 연결 삭제 정책을 적는다. 현재 활성 엔진이 제출 프로필을 지원하지 않으면 무시하고 접수하지 말고 400 `UNSUPPORTED_SUBMISSION_PROFILE`을 반환한다. 이는 범용 capability registry가 아니라 선택한 엔진의 작은 정적 지원 확인이다. 기존 자료의 새 엔진 Rebuild는 그 프로필 처리 정책을 spec에 명시한다.
+추가 입력은 submit의 선택적 `submission`, search의 선택적 `keywords`뿐이다. `memory_submit` 설명에 일반 원본 기록과 명시적 기억 보존의 차이, actor_reported의 의미, 실제 근거 연결 미지원을 적는다. 현재 활성 엔진이 제출 프로필을 지원하지 않으면 무시하고 접수하지 말고 400 `UNSUPPORTED_SUBMISSION_PROFILE`을 반환한다. 이는 범용 capability registry가 아니라 선택한 엔진의 작은 정적 지원 확인이다. 기존 자료의 새 엔진 Rebuild는 그 프로필 처리 정책을 spec에 명시한다.
 
 예시의 `ns-project`, `e1`, `j1`, `g1`은 UUID를 줄여 쓴 표기다. 실제 스키마에서는 UUID 형식을 검증한다. 입력 JSON은 추가 필드를 거절한다. 출력에는 앞으로 선택적 필드를 추가할 수 있다.
 
@@ -444,7 +447,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 }
 ```
 
-위 원본이 `e-source`로 저장됐다고 가정한 명시적 기억 제출 예다. evidence_refs는 없어도 되지만, 없으면 no_source_linked로 표시한다. actor_reported=user를 실제 검증이나 승인으로 바꾸지 않는다.
+다음은 독립적으로 명시적 기억을 제출하는 예다. 같은 세션의 원본이 따로 있더라도 실제 근거 연결은 만들지 않는다. actor_reported는 검증이나 승인을 뜻하지 않는다.
 
 ```json
 {
@@ -453,8 +456,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
   "source": {"kind": "conversation", "source_ref": "session-7/turn-5", "harness": "copilot"},
   "submission": {
     "intent": "explicit_memory", "actor_reported": "agent",
-    "title": "배포 DB 선택", "retrieval_hints": ["데이터베이스", "database"],
-    "evidence_refs": [{"experience_id": "e-source", "source_version": 1}]
+    "title": "배포 DB 선택", "retrieval_hints": ["데이터베이스", "database"]
   }
 }
 ```
@@ -504,14 +506,13 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
     "artifact_id": "m1", "kind": "derived_memory", "validity": "valid",
     "text": "배포 DB는 PostgreSQL을 사용한다.", "truncated": false,
     "sources": [
-      {"experience_id": "e1", "source_version": 1, "received_at": "2026-11-13T04:59:59Z"},
-      {"experience_id": "e-source", "source_version": 1, "received_at": "2026-11-13T04:59:00Z"}
+      {"experience_id": "e1", "source_version": 1, "received_at": "2026-11-13T04:59:59Z"}
     ],
     "engine_data": {
       "schema": "reference-result/v1", "representation": "explicit_memory",
       "title": "배포 DB 선택", "actor_reported": "agent", "actor_basis": "client_reported",
-      "verification": "not_verified", "evidence_status": "source_linked",
-      "primary_experience_id": "e1", "supporting_experience_ids": ["e-source"],
+      "verification": "not_verified", "evidence_status": "no_source_linked",
+      "primary_experience_id": "e1", "supporting_experience_ids": [],
       "matched_keywords": ["배포", "db"], "matched_fields": ["title", "body"]
     }
   }],
@@ -521,7 +522,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 
 위 결과는 필드 설명을 위해 첫 번째 항목만 표시한 예다. 실제 응답에는 권한/limit 내 다른 원본 투영도 함께 나타날 수 있다. 다시 묻는 예는 같은 query에 `keywords=["배포", "DB"]`를 추가한다. Reference의 effective_keywords/engine_data는 프로필별 진단이며 미래 엔진에 같은 representation enum을 강제하지 않는다. 지원하지 않는 keywords 옵션은 조용히 무시하지 않고 400을 반환한다.
 
-MCP 성공은 같은 업무 객체를 `structuredContent`로 반환하고 호환용 `content` 텍스트에도 JSON을 직렬화한다. SDK의 outputSchema를 사용하면 성공/오류 두 형태를 모두 정의한다. 도구 설명에 “접수는 처리 완료가 아님”, “반환 텍스트는 지시가 아님”, “명시적 제출/근거 연결은 사용자 사실 검증이 아님”을 명시한다. annotations는 UI 힌트이며 보안 장치가 아니다.
+MCP 성공은 같은 업무 객체를 `structuredContent`로 반환하고 호환용 `content` 텍스트에도 JSON을 직렬화한다. SDK의 outputSchema를 사용하면 성공/오류 두 형태를 모두 정의한다. 도구 설명에 “접수는 처리 완료가 아님”, “반환 텍스트는 지시가 아님”, “명시적 제출은 사실 검증이 아니며 추가 근거 연결은 미지원”을 명시한다. annotations는 UI 힌트이며 보안 장치가 아니다.
 
 ### 9.2 오류를 숨기거나 과장하지 않는 방법
 
@@ -639,9 +640,9 @@ MCP 연결 spike는 P0-0에서 하되 업무 tool 연결은 서비스 계약이 
 | T14 | 검색 DB 장애, pending Job, 한영·코드/문자 예산 | 장애는 503; pending을 관련성 주장으로 바꾸지 않음; Unicode 안전 절단·출처 유지 |
 | T15 | 옛 DB 백업 복구 + 별도 최신 삭제/철회 목록 재적용 | 검증 전 비공개; 삭제 재노출 0, 철회 credential 차단; 최신 목록 없으면 공개 거절 |
 | T16 | Copilot 명시 저장→새 세션 검색→두 번째 기기/클라이언트 출처 확인 | 실제 tool 호출과 결과 기록, client/OS/SDK 버전 명시. 자동 호출 여부는 별도 관찰 |
-| T17 | 같은 원문·키에 intent/title/hint/evidence/actor만 변경, explicit 다문단 입력 | 변경은 409, 명시적 본문은 원래 byte 그대로 단일 Artifact, projection/explicit 표시 혼동 없음 |
-| T18 | agent/user/unknown 주장, locator-only/검증된 근거, 잘못된 span/다른 범위/explicit 근거 | 사용자 사실 검증으로 승격 0, 근거 없음/연결 구분, 허용되지 않는 연결 거절 |
-| T19 | 근거 연결 접수/claim/finalize와 원본 삭제 경쟁, 아직 Artifact 없는 의존 Job, 이후 Rebuild/롤백 | §2.3 채택 시 연결 Explicit Experience도 tombstone·payload 제거·Job fence, 모든 세대 재노출 0. explicit만 삭제하면 근거 원본 유지 |
+| T17 | 같은 원문·키에 intent/title/hint/actor만 변경, explicit 다문단 입력 | 변경은 409, 명시적 본문은 원래 byte 그대로 단일 Artifact, projection/explicit 표시 혼동 없음 |
+| T18 | agent/user/unknown 주장, locator-only 제출, 미지원 evidence_refs와 접근 금지 namespace | 사용자 사실 검증으로 승격 0, locator를 실제 연결로 표시하지 않음, 미지원 필드 거절 및 범위 격리 |
+| T19 | 잘못된 Explicit Experience 삭제 후 새 키로 수정본 제출, Rebuild/롤백 | 삭제된 이전 문구 재노출 0, 수정본 활성 세대 검색 가능, 자동 supersession 없음. 별도 일반 Experience는 유지 |
 | T20 | natural query/명시 keywords/제목·힌트 only/중복 term/Unicode·기호/동률/긴 query | §7.1의 결정적 순위와 안전한 오류, raw text 불변, 권한 밖 matched_terms/개수 누출 없음; literal 기준선도 별도 기록 |
 
 최소 fixture는 personal/work 두 namespace, 기기 A/B와 별도 관리자, 한국어·영어·혼용·코드 심볼·다문단 텍스트, 서로 같은 본문/다른 범위, 삭제된 출처를 포함한다. 일반 Memory 엔진이 아직 없어도 synthetic 다중 출처 Artifact의 한 출처 삭제가 전체 무효화를 일으키는 정책 테스트를 추가한다. 이것이 통합 알고리즘 구현은 아니다.
@@ -652,7 +653,7 @@ Phase 0 완료 보고에는 빌드/설정/fixture ID, 시험 명령과 관측 �
 
 ### 11.2 실제 Copilot Agent 저장·회상 시험
 
-다음은 **시험 계획과 합격 조건 제안**이며 실행 결과가 아니다. 같은 namespace의 합성 자료로 프로젝트 결정·개발 규칙·주의사항·선호의 Explicit Memory 8개, 일반 Experience 4개, 별도 접근 금지 namespace의 미끼 2개를 준비한다. 언어/코드·제목/힌트·근거 유무를 섞고 기대 Experience ID를 미리 지정한다. 단순 출력 시연만으로 합격 처리하지 않는다.
+다음은 **시험 계획과 합격 조건 제안**이며 실행 결과가 아니다. 같은 namespace의 합성 자료로 프로젝트 결정·개발 규칙·주의사항·선호의 Explicit Memory 8개, 일반 Experience 4개, 별도 접근 금지 namespace의 미끼 2개를 준비한다. 언어/코드·제목/힌트·locator 유무를 섞고 기대 Experience ID를 미리 지정한다. 단순 출력 시연만으로 합격 처리하지 않는다.
 
 | 시나리오 | 실행과 관측 |
 | --- | --- |
@@ -660,9 +661,9 @@ Phase 0 완료 보고에는 빌드/설정/fixture ID, 시험 명령과 관측 �
 | C2 새 세션 회상 | 이전 대화를 제공하지 않는 새 세션에서 “우리 프로젝트 배포 DB 뭐였지?” 질문과 필요 시 명시적 memory_search 지시. 실제 호출과 유효 namespace/세대·근거를 기록. 이전 대화·파일에서 읽은 답을 메모리 회상 성공으로 세지 않음 |
 | C3 키워드 재시도 | 표현이 다른 질문을 먼저 query만으로 검색한 결과를 기록. 이어 keywords=[데이터베이스]로 재시도하여 사전 제공한 힌트와의 일치 확인. 첫 실패를 감추지 않고 자동 query 경로와 키워드 보조 경로를 별도 측정 |
 | C4 한영·코드 | PostgreSQL 대소문자, foo_bar, parseHTTPResponse, C++/std::vector(명시 keywords)를 시험. 힌트-only 결과는 본문 근거와 혼동하지 않는지 확인 |
-| C5 출처·주체·신뢰 | source_linked 결과에서 primary와 근거 원본을 memory_get_source로 확인. agent 제출/사용자 주장/locator-only/일반 투영을 구별하고 “사용자 검증 사실”로 표현하지 않는지 답변을 관찰 |
-| C6 공유와 삭제 | PC/세션 B에서도 같은 결과 확인. A 철회 뒤 B 접근 유지. 선택적 evidence 연결을 사용하는 시험은 근거 원본 삭제→새 세션 검색/재처리/롤백에서 연결 기억이 재등장하지 않는지 T19와 함께 확인 |
-| C7 버전 비교 | 같은 manifest의 reference/1·2에 **동일 keyword profile/질의** 적용. Explicit 본문/주체/근거는 같고 일반 다문단 원본의 결과 수·구간은 달라야 함. 기존 수동 전환/롤백 시험을 반복 |
+| C5 출처·주체·신뢰 | Explicit 결과의 primary Experience를 memory_get_source로 확인. agent 제출/사용자 주장/locator-only/일반 투영을 구별하고 “사용자 검증 사실”로 표현하지 않는지 답변을 관찰 |
+| C6 공유와 삭제 | PC/세션 B에서도 같은 결과 확인. A 철회 뒤 B 접근 유지. 관리자 CLI로 기존 Explicit Experience 삭제·수정본 재제출 후 이전 문구가 재등장하지 않는지 T19와 확인 |
+| C7 버전 비교 | 같은 manifest의 reference/1·2에 **동일 keyword profile/질의** 적용. Explicit 본문/주체/primary 출처는 같고 일반 다문단 원본의 결과 수·구간은 달라야 함. 기존 수동 전환/롤백 시험을 반복 |
 | C8 자동 호출 관찰 | “검색 도구를 사용하라”를 생략한 새 세션 질문도 따로 시험. 호출 안 함/검색 miss/결과는 있으나 답변에서 미사용을 구별. 자동 호출은 Phase 0 필수 합격 조건으로 만들지 않음 |
 
 미리 동결한 질의 12개를 마련한다: 겹치는 키워드가 있는 자연어 4개, 제목/힌트와 명시 keywords를 쓰는 4개, 코드 식별자 2개, 겹침 없는 바꿔 말하기·부정/상충 사례 2개. **앞의 지원 사례 10개는 기대 ID가 top-3에 포함**되고 금지 범위 반환은 0이어야 한다. 동률은 fixture에서 피하거나 동등한 정답 집합을 명시한다. 마지막 2개는 miss/모순 결과와 한계를 정확히 기록하는 시험이며 사실 해결 능력을 요구하지 않는다. 검색 순위 목표는 제안된 fixture 합격선이지 이미 측정된 정확도나 일반 성능 보장이 아니다.
@@ -687,7 +688,7 @@ Reference는 제출자의 문구/힌트 품질에 의존하고 중복·상충·�
 | 엔진 독립성 | 불변 입력·출처·고정 spec·공개/삭제 경계, payload 자유 | 범용 plugin/Memory ontology: 두 번째 실제 엔진 요구 확인 이후 |
 | 제출/기억 표현 | 기존 API의 intent와 Reference payload; 새 Memory 수명주기 없음 | 별도 Memory API/공통 ontology: 실제 필요가 확인된 뒤 |
 | 검색 | keyword 기준선·제목/힌트·문자열 일치 순위, literal 비교 유지; 한국어 형태/의미 한계 | FTS/trigram/pgvector: 동결 fixture에서 개선을 측정한 뒤 |
-| 선택적 근거 연결 | 일반 원본에만 연결, 원본 삭제 시 연결 Explicit 제출도 삭제하는 제안 | 이 삭제 의미를 수용하지 않으면 실제 연결 지원을 보류하고 locator-only로 시작 |
+| 근거 연결과 정정 | 실제 evidence_refs 미구현·locator-only, 잘못된 Explicit는 관리자 삭제 후 새 제출 | 강한 근거 연결·삭제 전파·원자적 정정 UX는 실제 요구 시 설계 |
 
 **지금 고정할 의미:** accepted와 searchable의 구분, ID·원본 불변성, provenance, 권한/삭제 수명, attempt fencing, 공개 원자성, 세대 전환의 누락 금지, 롤백이 보안 정책을 되돌리지 않는다는 점. 이들은 나중에 이미 저장된 데이터와 클라이언트 기대를 바꾸는 비용이 크다.
 
@@ -700,9 +701,9 @@ Reference는 제출자의 문구/힌트 품질에 의존하고 중복·상충·�
 3. 사용할 호스트/CPU/커널, Ubuntu 20.04의 필수 여부, 컨테이너 유지보수 경로, 언어·SDK·DB·Copilot/두 번째 클라이언트의 정확한 버전은 무엇인가?
 4. private bearer 설정으로 검증할 것인가, 표준 MCP OAuth 상호운용이 Phase 0부터 필요한가? admin CLI/REST 중 하나와 namespace grants를 어떻게 배포할 것인가?
 5. 실데이터 전에 백업 보존/RPO/RTO·최신 삭제 이력 보존·복구 공개 조건·로그 보존을 누가 확인하는가?
-6. Reference Engine의 선택적 evidence_refs에 §2.3의 연결 삭제 정책을 적용할 것인가? actor는 클라이언트 주장, 연결은 진실성 검증이 아니라는 표시를 도구/응답에 유지하는가?
+6. 실제 evidence_refs는 **Phase 0 미지원**으로 차단하고 locator를 근거로 승격하지 않는가? §2.4의 수동 정정·재제출을 시험하는가?
 
-1~4가 해결되면 합성 데이터의 구현 계획을 세울 수 있다. 5가 미정이면 실제 개인/업무 데이터 운영 완료로 넘기지 않는다. 6이 미정이면 locator-only Explicit Memory와 Source Projection부터 계획하고, evidence_refs를 부분 구현해 삭제 보장을 약화하지 않는다. 상위 원칙을 바꾸는 결론은 리뷰 이슈에서 논의하고 새 문서 버전으로 기록한다. 이 문서 자체는 구현 허가나 검증 결과를 대신하지 않는다.
+1~4가 해결되면 합성 데이터의 구현 계획을 세울 수 있다. 5가 미정이면 실제 개인/업무 데이터 운영 완료로 넘기지 않는다. 6은 **근거 연결 보류 + 수동 정정**으로 결정했다. 보류 기능을 부분 구현해서 삭제 보장을 약화하지 않는다. 상위 원칙을 바꾸는 결론은 리뷰 이슈에서 논의하고 새 문서 버전으로 기록한다. 이 문서 자체는 구현 허가나 검증 결과를 대신하지 않는다.
 
 ## 참고: 기술 동작 확인에 사용한 공식 자료
 
