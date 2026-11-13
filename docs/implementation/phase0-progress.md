@@ -1,4 +1,4 @@
-# Phase 0 구현 기록 — P0-0 환경 / P0-1 접수 / P0-2 Worker·검색 / P0-3 삭제·철회
+# Phase 0 구현 기록 — P0-0 환경 / P0-1 접수 / P0-2 Worker·검색 / P0-3 삭제·철회 / P0-4 Generation / P0-5 MCP·운영
 
 > 구현 진행 중 기록이다. 설계 기준선([Phase 0 Detailed Design v0.1](../design/phase0-detailed-design-v0.1.md))을 바꾸지 않고, 구현에서 선택한 값과 **실제로 관측한 결과**만 적는다. 추적: [Issue #6](https://github.com/YB-Park/LLM-Agent-Memory/issues/6)
 
@@ -18,7 +18,7 @@ python3 -m memory_server.migrate
 python3 -m memory_server.admin create-namespace --name personal
 python3 -m memory_server.admin create-principal --name laptop     # 토큰은 한 번만 출력
 python3 -m memory_server.admin grant --principal <id> --namespace <id> --write
-python3 -m memory_server.rest --port 8080
+python3 -m memory_server.app --port 8080        # ASGI(REST+MCP). P0-5 이전의 memory_server.rest는 삭제됨
 ```
 
 ## 2. P0-0 결정 (최초 선택 — 런타임 부분은 §5에서 대체됨)
@@ -92,7 +92,7 @@ P0-0의 Python 3.8 / PostgreSQL 12는 upstream 지원이 끝났고 공식 `mcp` 
 | `search.py` | `reference-keywords/v1`, `literal-substring/v1` 질의. 활성 Generation의 valid·성공 Job·보존 출처 artifact만 후보 |
 | `textnorm.py` | 색인·질의 양쪽이 쓰는 단일 정규화(NFC + ASCII 소문자) |
 | `service.py` | `MemoryService.search` (control SHARE → 인증 → 읽기 권한 → 활성 Generation) |
-| `rest.py`, `admin.py`, `config.py` | `POST /v1/memories/search`, `create-namespace`의 engine_version/index_profile 인자, lease/heartbeat/attempt 설정 |
+| `rest.py`(P0-5에서 `app.py`로 대체), `admin.py`, `config.py` | `POST /v1/memories/search`, `create-namespace`의 engine_version/index_profile 인자, lease/heartbeat/attempt 설정 |
 
 - **Explicit Memory**: 원문 그대로 1개 artifact(`local_key="0"`), 제목·힌트는 `payload.search`의 별도 메타데이터. 검증 상태는 `not_verified`, 근거는 `no_source_linked`로만 표기한다.
 - **reference/1**: 일반 Experience 전체를 1개 projection. **reference/2**: 빈 줄(`\n\n`+) 기준 문단 projection, 순서(`local_key`)와 UTF-8 바이트 span을 출처에 기록(문단 ≤256개, 출력 ≤1 MiB).
@@ -232,3 +232,76 @@ P0-0의 Python 3.8 / PostgreSQL 12는 upstream 지원이 끝났고 공식 `mcp` 
 
 - 롤백 불가 조건(`ingest_revision` 불일치)은 삭제만 있었어도 보수적으로 막는다. 이는 안전 쪽 선택이다.
 - 비교·coverage가 전체 원본을 한 트랜잭션에서 읽는다. 원본이 수만 건이 되면 배치화가 필요하다.
+
+## 9. P0-5 — MCP, 원격 접근, 배포, 백업·복구, 프로세스 장애
+
+**판정: 부분 완료.** 실제 VS Code Copilot 검증(C1~C8의 에이전트 측)을 수행하지 못했고, 실제 외부 호스트·실제 인증서·실제 20.04 호스트도 검증하지 못했다. **실제 개인·업무 데이터 사용 미승인.** 운영 문서: [deployment](../operations/deployment.md), [backup-recovery](../operations/backup-recovery.md), [vscode-copilot](../operations/vscode-copilot.md).
+
+### 실행 환경 (실제 사용)
+
+Ubuntu 24.04 컨테이너 / Python 3.12.3 / PostgreSQL 16.15 / psycopg2 2.9.9 / pytest 7.4.4. MCP SDK `mcp` 2.3.0(`mcp-types` 2.3.0, Python 3.10+ 필요), uvicorn 0.54.0, starlette 1.10.0, httpx2 2.16.0. 배포: Docker 29.1.3, Compose 2.40.3, Caddy 2.11.9, `postgres:16`. MCP 전송은 Streamable HTTP(stateless, JSON 응답), 협상 프로토콜은 SDK 기본(`2026-07-28`)과 `2025-11-25` 모두 클라이언트로 확인. 의존성은 `requirements.txt`에 버전만 고정(해시 고정 없음).
+
+### 구현 항목과 모듈 책임
+
+| 모듈 | 책임 |
+| --- | --- |
+| `app.py` (신규, `rest.py` 대체) | ASGI 앱. `Edge` 미들웨어(Host/Origin 허용 목록, 본문 크기 413, 인증 실패 제한 429, credential별 요청 예산, `/mcp` 조기 인증 401/503), REST 라우트, `/healthz`·`/readyz`. 같은 Application Service 호출 |
+| `mcp_tools.py` (신규) | **정확히 4개** 도구(`memory_submit`, `memory_job_status`, `memory_search`, `memory_get_source`). 얇은 어댑터: DB·권한·Job 로직 없음. 오류는 안전한 코드/메시지로만 매핑, `evidence_refs`는 REST와 같이 거절 |
+| `service.py` | 격리(quarantine) 게이트(`service_state`, 503 `RECOVERY_QUARANTINE`), `authenticate` |
+| `ledger.py` (신규) | 해시 체인 정책 ledger(삭제·철회·권한 축소) |
+| `recovery.py` (신규) | 암호화 백업, 빈 DB 복원, ledger 재적용, 검증, release, 수동 격리 |
+| `migrate.py` | 역할 분리(`provision_roles`), PG<15 `public` 스키마 CREATE 기본값 fail-closed 검사 |
+| `admin.py`/`operations.py` | ledger 기록, `rotate-credential` |
+| `worker.py` | SIGTERM/SIGINT에서 진행 중 Job을 마치고 종료 |
+| `db.py` | `connect_timeout=3` |
+| `docker-compose.yml`, `docker/Dockerfile`, `deploy/` | db/migrate/api/worker/proxy, 내부 전용 네트워크, 하드닝, 비root, `*_FILE` 비밀 |
+| `migrations/0002_service_state.sql` | `service_state` |
+
+### 실제 실행한 시험
+
+| 환경 | 명령 | 결과 |
+| --- | --- | --- |
+| 24.04 / Py3.12 / PG16 | `./scripts/verify.sh` | **187 passed, 8 skipped**(skip = Compose e2e, opt-in) |
+| 레거시 20.04 컨테이너 / Py3.8 / PG12 | `./scripts/verify.sh legacy` | **166 passed, 4 skipped** (MCP/ASGI/REST는 SDK가 3.10+ 필요하여 `importorskip`) |
+| 실제 Compose 스택(이 호스트) | `E2E_COMPOSE=1 pytest --noconftest tests/test_p0_5_compose_e2e.py` | **8 passed** (약 2분) |
+
+기존 147개 시험은 모두 유지·통과했다. 이 중 `test_p0_3_policy.py::test_admin_cli_commands_and_no_public_admin_surface`는 구 `rest.py` 서버 대신 새 `RunningServer`(uvicorn)를 쓰도록 **서버 기동 방법만** 바꿨고 단언은 약화하지 않았다. 신규(P0-5) 시험: MCP 14, 역할 4, 복구 12, 프로세스 4, Compose e2e 8(+ REST 어댑터 시험의 서버 교체분).
+
+| 시험 | 실제로 확인한 것 | 한계 |
+| --- | --- | --- |
+| `test_p0_5_mcp` | 공식 MCP 클라이언트로 HTTP 초기화·도구 목록(4개, 관리 도구 없음)·4개 도구 호출, REST와 같은 업무 결과, 401 전송 거부, 프록시 임의 헤더 무시, 철회 즉시 차단(다른 기기 유지), namespace 격리·읽기 전용 grant, Host/Origin/크기/비정상 요청, 인증 실패 제한(서비스 전체는 막지 않음), 내부 오류·credential 비누출, 격리 상태에서 모든 경로 503 | 로컬 uvicorn(평문). TLS는 e2e에서 |
+| `test_p0_5_roles` | 런타임 역할이 DDL·역할 변경·감사/마이그레이션 변조·TRUNCATE 불가, 백업 역할 읽기 전용, 서비스 전체 흐름이 런타임 역할로 동작, PG<15 기본값 fail-closed | |
+| `test_p0_5_recovery` | 삭제·철회·권한 축소가 이전 백업 복원 후 재적용됨(확대는 안 함), 실행 중 attempt fence, 비어있지 않은 대상 거부, ledger 손상 시 격리 유지, release 거부 조건, HMAC 키 불일치 경고, 아카이브 암호화, ledger 쓰기 실패 시 삭제 중단 | 같은 PG 서버의 별도 DB |
+| `test_p0_5_processes` | 실제 자식 프로세스 `SIGKILL`(claim 직후, finalize 중, Rebuild 준비 중, 전환 커밋 직전)과 SIGTERM, 복구 후 중복 Artifact 없음·부분 Generation 없음 | hook 지점은 주입된 지점(임의 시점 kill 아님) |
+| `test_p0_5_compose_e2e` | TLS 전용(평문 400, 8080/5432 비게시, 무인증 401), https MCP로 저장→회상→출처→기기 철회, claimed Job 강제 종료 후 attempt 2·Artifact 1개, worker 중단 중 접수된 Job 처리, api·DB 재시작(DB 중단 중 503 `DB_UNAVAILABLE`·내부 정보 비노출·복구 후 정상), gate paused 상태의 전체 재시작, 로그 비밀 비누출, 컨테이너 기반 백업·복원·재적용·release 거부 | 개발용 CA, localhost, 합성 데이터 |
+
+### 설계 T14~T20·C1~C8 대응
+
+| 항목 | 상태 |
+| --- | --- |
+| T14 MCP/REST 동등성, 관리 도구 비노출 | 자동 시험 통과 |
+| T15 백업·복원 후 재노출 방지 | 격리 복원·ledger 재적용 통과(위 한계 참고) |
+| T16 인증·철회·범위 격리 | 자동 시험 통과 |
+| T17 장애·재시작(프로세스 수준) | 컨테이너 수준 통과(실제 호스트 재부팅은 미시험) |
+| T18~T20 | 기존 P0-2~P0-4 시험 범위 + 위 e2e |
+| C1~C8 | **Copilot 측은 전부 미검증.** 서버 측 동작만 자동 확인([vscode-copilot.md](../operations/vscode-copilot.md)) |
+
+### 설계와 달라진 점 / 판단
+
+- **서버 프레임워크 교체**: `http.server` → ASGI(uvicorn). 공식 SDK가 Python 3.10+ 이고 REST·MCP를 한 서버에서 제공해야 했다. 도메인·서비스 코드 무변경.
+- **정책 ledger 신설**: 설계의 "백업과 별도의 최신 정책 이력" 요구를 위해 DB 밖의 해시 체인 ledger를 추가했다. DB 커밋 **전**에 기록(충돌 시 과다 적용 방향). 해시 체인은 전체 재작성 공격을 막지 못한다.
+- **복원은 빈 DB에만, 항상 격리 시작**, release는 운영자 attestation 필요.
+- **DB 역할 3개**(owner/app/backup) 분리. Worker도 `memory_app`이며 ledger 접근이 없다(삭제는 api/admin 경로만).
+- **Docker 내장 DNS 미사용**: 이 호스트에서 internal 네트워크 이름 해석 실패 → 고정 IP + `extra_hosts`.
+- **gpg는 임시 `GNUPGHOME`**: 읽기 전용 컨테이너에 홈이 없어 첫 e2e에서 실패했고 코드에서 수정.
+- `db.connect`에 연결 타임아웃을 두어 DB 중단 시 요청이 무한 대기하지 않고 503을 반환한다(e2e에서 ReadTimeout으로 드러남).
+- 레거시 PG12 시험이 PG<15 기본 권한(PUBLIC CREATE) 때문에 실패해서, 런타임 역할이 DDL 가능하면 provisioning이 실패하도록 코드를 바꾸고 테스트 픽스처는 배포 스크립트와 같은 REVOKE를 수행하게 했다.
+
+### 아직 검증하지 못한 것 / 남은 위험
+
+- **실제 VS Code Copilot**: 정적 Bearer 헤더가 현재 클라이언트에서 동작하는지, OAuth 발견 시도 여부, 도구 자동 호출(C8) 모두 미검증.
+- 실제 호스트·공인 도메인·신뢰 인증서·ACME·외부 노출, 실제 20.04 호스트 커널/패키지: 미검증.
+- 백업 이후 데이터·credential 손실, 오래된 백업 파일의 물리 소거 불가(`backup_erasure: not_guaranteed`), ledger 전체 재작성 위험, 최신 ledger 판단이 운영자 attestation에 의존.
+- 인증 실패 제한은 프록시가 전달한 X-Forwarded-For(신뢰 IP에서만)에 의존. 의존성 해시 고정·이미지 스캔 없음. 요청 예산은 프로세스 메모리(재시작 시 초기화, 다중 인스턴스 비공유).
+- 호스트 전체 재부팅, 디스크 풀, 긴 시간의 PostgreSQL 장애는 시험하지 않음.
+- Issue #6의 P0-5 체크리스트 중 "Copilot 실사용", "실제 호스트 TLS", "20.04 호스트"는 이 결과와 일치하지 않는다(미완). 원격 이슈는 수정하지 않았다.

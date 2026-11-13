@@ -2,8 +2,8 @@
 
 LLM/Agent Harness에 종속되지 않는 **개인 소유 장기 에이전트 메모리 시스템**을 실험·개발하는 프로젝트입니다. GitHub Copilot Agent(VS Code)를 첫 클라이언트로 삼고, 여러 PC·세션·다른 에이전트와 같은 원격 기억을 활용하는 것을 목표로 합니다.
 
-> **현재 상태: Phase 0 구현 진행 중 (P0-0~P0-4 구현·로컬 시험 통과: 접수·Worker·검색·삭제·철회·Rebuild/Generation 비교·수동 전환·조건부 롤백). 기준 런타임: Ubuntu 24.04 컨테이너 / Python 3.12 / PostgreSQL 16, 20.04는 레거시 호환성 기록**  
-> 설계 기준선은 채택됐고 접수·멱등성·범위 격리·Worker·Reference Engine·검색·삭제·권한 철회·Rebuild/Generation 전환까지 코드와 시험이 있습니다. **MCP/TLS 및 실제 20.04 호스트·Copilot 클라이언트 검증은 아직 완료되지 않았습니다.** 진행·관측 결과: [구현 기록](docs/implementation/phase0-progress.md) — 시험 실행: `./scripts/verify.sh` (레거시: `./scripts/verify.sh legacy`)
+> **현재 상태: Phase 0 구현 거의 완료 — P0-0~P0-4 구현·시험 통과, P0-5(MCP·원격 접근·Compose 배포·백업/복구·프로세스 장애) 부분 완료.** 기준 런타임: Ubuntu 24.04 컨테이너 / Python 3.12 / PostgreSQL 16 (20.04는 레거시 호환성 기록).  
+> 공식 MCP SDK(Streamable HTTP) 4개 도구, 기기별 Bearer credential, TLS 프록시, 격리 복원과 정책 ledger 재적용까지 합성 데이터로 시험했습니다. **실제 VS Code Copilot 연결, 실제 외부 호스트·신뢰 인증서, 실제 20.04 호스트는 검증하지 못했고 실제 개인·업무 데이터 사용은 승인되지 않았습니다.** 진행·관측: [구현 기록](docs/implementation/phase0-progress.md) · 운영: [배포](docs/operations/deployment.md), [백업·복구](docs/operations/backup-recovery.md), [VS Code Copilot 가이드](docs/operations/vscode-copilot.md) — 시험: `./scripts/verify.sh` (레거시: `./scripts/verify.sh legacy`)
 
 ## 먼저 읽을 문서
 
