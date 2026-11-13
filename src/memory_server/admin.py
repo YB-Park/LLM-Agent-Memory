@@ -4,6 +4,9 @@ Usage: python3 -m memory_server.admin <command> [options]
   create-namespace --name NAME
   create-principal --name NAME [--kind device|admin]   (prints the token once)
   grant --principal ID --namespace ID [--read] [--write] [--manage]
+  delete-experience --experience ID          (tombstone source, invalidate derived results in all generations)
+  revoke-principal --principal ID            (credential revoked, its open jobs cancelled, shared data kept)
+  retry-job --job ID --expected-attempt N --principal ID   (principal needs manage on the job's namespace)
 """
 import argparse
 import json
@@ -14,8 +17,10 @@ import uuid
 from psycopg2.extras import Json
 
 from .config import Config
+from .errors import ServiceError
 from .engine import reference_spec, spec_digest
 from .db import connect
+from .operations import delete_experience, fence_principal_jobs, retry_job, revoke_principal
 from .service import credential_digest
 
 
@@ -75,6 +80,7 @@ def grant(dsn, principal_id, namespace_id, read=False, write=False, manage=False
         cur.execute("SELECT can_read, can_write, can_manage FROM namespace_grants "
                     "WHERE principal_id = %s AND namespace_id = %s", (principal_id, namespace_id))
         old = cur.fetchone()
+        fenced = 0
         reduced = old is not None and ((old["can_read"] and not read) or (old["can_write"] and not write)
                                        or (old["can_manage"] and not manage))
         cur.execute("INSERT INTO namespace_grants (principal_id, namespace_id, can_read, can_write, can_manage) "
@@ -84,12 +90,13 @@ def grant(dsn, principal_id, namespace_id, read=False, write=False, manage=False
                     (principal_id, namespace_id, read, write, manage))
         if reduced:
             cur.execute("UPDATE principals SET auth_epoch = auth_epoch + 1 WHERE id = %s", (principal_id,))
+            fenced = len(fence_principal_jobs(cur, principal_id))
         cur.execute("UPDATE system_control SET policy_revision = policy_revision + 1")
         cur.execute("INSERT INTO audit_events (event_type, object_ids, safe_details) VALUES ('grant_set', %s, %s)",
                     (Json({"principal_id": principal_id, "namespace_id": namespace_id}),
                      Json({"read": read, "write": write, "manage": manage})))
         return {"principal_id": principal_id, "namespace_id": namespace_id,
-                "can_read": read, "can_write": write, "can_manage": manage}
+                "can_read": read, "can_write": write, "can_manage": manage, "jobs_cancelled": fenced}
 
     return _tx(dsn, fn)
 
@@ -108,16 +115,41 @@ def main(argv=None):
     s.add_argument("--read", action="store_true")
     s.add_argument("--write", action="store_true")
     s.add_argument("--manage", action="store_true")
+    s = sub.add_parser("delete-experience")
+    s.add_argument("--experience", required=True)
+    s = sub.add_parser("revoke-principal")
+    s.add_argument("--principal", required=True)
+    s = sub.add_parser("retry-job")
+    s.add_argument("--job", required=True)
+    s.add_argument("--expected-attempt", type=int, required=True)
+    s.add_argument("--principal", required=True)
     args = p.parse_args(argv)
-    dsn = Config.from_env().database_url
+    config = Config.from_env()
+    dsn = config.database_url
+    try:
+        out = _dispatch(args, config, dsn)
+    except ServiceError as exc:
+        json.dump(exc.to_dict(), sys.stderr)
+        sys.stderr.write("\n")
+        sys.exit(1)
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+
+
+def _dispatch(args, config, dsn):
+    if args.cmd == "delete-experience":
+        return delete_experience(config, args.experience)
+    if args.cmd == "revoke-principal":
+        return revoke_principal(config, args.principal)
+    if args.cmd == "retry-job":
+        return retry_job(config, args.principal, args.job, args.expected_attempt)
     if args.cmd == "create-namespace":
         out = create_namespace(dsn, args.name)
     elif args.cmd == "create-principal":
         out = create_principal(dsn, args.name, args.kind)
     else:
         out = grant(dsn, args.principal, args.namespace, args.read, args.write, args.manage)
-    json.dump(out, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    return out
 
 
 if __name__ == "__main__":

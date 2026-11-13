@@ -1,4 +1,4 @@
-# Phase 0 구현 기록 — P0-0 환경 / P0-1 접수 / P0-2 Worker·검색 (이후 단계는 같은 문서에 이어서 기록)
+# Phase 0 구현 기록 — P0-0 환경 / P0-1 접수 / P0-2 Worker·검색 / P0-3 삭제·철회
 
 > 구현 진행 중 기록이다. 설계 기준선([Phase 0 Detailed Design v0.1](../design/phase0-detailed-design-v0.1.md))을 바꾸지 않고, 구현에서 선택한 값과 **실제로 관측한 결과**만 적는다. 추적: [Issue #6](https://github.com/YB-Park/LLM-Agent-Memory/issues/6)
 
@@ -132,3 +132,48 @@ P0-0의 Python 3.8 / PostgreSQL 12는 upstream 지원이 끝났고 공식 `mcp` 
 
 - 실제 OS 프로세스 kill·재시작 후 복구(예외 주입으로만 모사), 장시간 lease/clock skew, 대용량 큐 성능.
 - 검색 품질 평가(회상률)는 하지 않았다. 위 한계는 고정만 했다.
+
+## 7. P0-3 — 삭제, 권한 철회, 수동 정정
+
+### 구현 항목과 모듈 책임
+
+`operations.py`(신규)가 관리 명령의 유일한 구현이다. 모든 명령은 **control 잠금 exclusive 아래 한 트랜잭션**이라 접수·claim·finalize와 전순서가 정해진다. 전송은 관리 CLI뿐이며 REST/MCP에는 등록하지 않았다(시험으로 확인).
+
+| 명령 (CLI) | 동작 |
+| --- | --- |
+| `delete-experience --experience ID` | 원본 tombstone(본문·메타·digest 삭제), 모든 Generation의 파생 artifact를 `invalidated`로 바꾸고 payload/표시/검색 텍스트 삭제, 미종료 Job을 `cancelled(SOURCE_DELETED)`+attempt 증가, `policy_revision`·영향 세대 `result_revision` 증가, audit(ID·개수만). 응답: `visibility=hidden`, `operational_payload=redacted`, `backup_erasure=not_guaranteed`. 멱등 |
+| `revoke-principal --principal ID` | `revoked_at`+`auth_epoch` 증가, 그 principal이 요청한 미종료 Job을 `cancelled(AUTHORITY_REVOKED)`로 fence, `policy_revision` 증가. **공유 원본·기존 결과는 삭제하지 않음.** 멱등 |
+| `grant` (권한 축소) | 기존 CLI에 추가: 축소 시 `auth_epoch` 증가와 동일하게 해당 principal의 미종료 Job fence |
+| `retry-job --job ID --expected-attempt N --principal ID` | can_manage 보유 principal이 failed/cancelled Job을 **자기 권한으로** 재큐잉(requested_by/authority_epoch 교체, retry_count 초기화, audit에 이전·새 주체). succeeded·삭제 원본·retired/aborted 세대는 409. attempt 불일치는 409 `STALE_ATTEMPT`, 이미 적용된 동일 명령은 `already_applied` |
+
+- **수동 정정**은 새 기능이 아니라 위 명령의 조합이다: `delete-experience` → 올바른 내용을 새 멱등성 키로 제출 → Job/검색 확인. 옛 키로 재제출하면 410이라 되살아나지 않는다. supersession·자동 통합 없음.
+- 독립 원본 간 근거 의존성은 만들지 않았다: 일반 원본 삭제가 `source_ref`를 가진 Explicit Memory를 지우지 않는다(시험).
+- `evidence_refs`는 여전히 접수 시 거절(P0-1)이며 변경하지 않았다.
+
+### 실제 실행한 시험 (`tests/test_p0_3_policy.py`, 18 cases)
+
+24.04 / Python 3.12 / PG16, 전체 **116 passed** (P0-1 44 + P0-2 54 + P0-3 18). 경합 시험은 별도 연결·스레드이며 "대기 중" 여부는 `pg_stat_activity`의 Lock 대기로 확인한다(sleep 추정 아님).
+
+| 설계 시험 | 시나리오 | 결과 |
+| --- | --- | --- |
+| T5 | Worker 계산 후 / finalize 트랜잭션 직전 삭제 → 늦은 결과 폐기, artifact 없음 | 통과 |
+| T5 | finalize가 잠금을 쥔 채 커밋 직전, 삭제 대기 → finalize 커밋 후 삭제가 즉시 무효화 | 통과 |
+| T5/T6 | 접수 직후(Worker 전) 삭제, 공개 후 삭제, 멱등 재삭제, 알 수 없는 ID | 통과 |
+| T6 | 다른 Generation의 결과까지 무효화, 이후 그 세대를 active로 바꿔도 검색 불가(실제 Worker로 2세대 생성) | 통과 |
+| T7 | A 철회: A 401, A의 대기 Job 취소, B는 A가 만든 공유 결과·원본 계속 조회 | 통과 |
+| T7 | 계산 중 철회 → 늦은 finalize 차단 / 커밋 직전 철회 → 이미 확정된 공유 결과는 유지 | 통과 |
+| T7 | 취소된 Job은 B의 `retry-job` 전에는 공개 안 됨, retry 후 B 권한으로 공개, manage 없으면 404, 철회된 principal 404 | 통과 |
+| T19 | 수동 정정 흐름, 옛 기억 재등장 없음, 독립 Explicit 비연쇄 삭제 없음 | 통과 |
+
+### 설계와 달라진 점 / 판단
+
+- 삭제의 `artifact_sources`는 행을 유지한다(복합 FK 때문). span은 위치 정보뿐이고 본문이 없다. 검색은 원본 `retained` 여부를 매번 확인하므로 이 행이 노출 경로가 되지 않는다.
+- grant 축소가 해당 principal의 **모든 namespace** Job을 fence한다(auth_epoch가 principal 단위라서). 설계와 동일한 규칙이나 범위가 넓으므로 기록한다. 필요 시 manage 주체가 `retry-job`으로 되살린다.
+- `ingest_receipts.request_digest`와 `jobs.input_digest`는 HMAC/SHA 파생값으로 삭제 후에도 남는다. 원문 복원은 불가하지만 "동일 내용 여부 추측"은 키를 가진 쪽에 가능하다. 설계 §6.4가 이 값을 지우라고 요구하지 않아 유지했다. 이후 변경 여부는 열린 이슈.
+- 설계 §9.3의 REST `/v1/admin/*` 형태는 구현하지 않고 CLI만 둔다(P0-0 결정 "관리 전송은 CLI 하나"와 일치).
+
+### 아직 검증하지 못한 것
+
+- Rebuild·롤백 경로에서의 삭제 재노출 방지(T6 후반, T10 일부)는 P0-4에서 확인한다. 이번에는 과거 Generation을 SQL로 active 전환하는 모사만 했다.
+- 백업/복원 후 삭제 재적용(T15)은 P0-5 범위다. `backup_erasure`는 `not_guaranteed` 그대로다.
+- 삭제 도중 프로세스 kill은 트랜잭션 원자성에 의존하며 별도 kill 시험은 하지 않았다.
