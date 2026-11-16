@@ -1,4 +1,4 @@
-"""ASGI application: REST (/v1/*) + MCP Streamable HTTP (/mcp) + health, behind one security edge.
+"""ASGI application: REST (/v2/*) + MCP Streamable HTTP (/mcp) + health, behind one security edge.
 
 Both protocol adapters call the same MemoryService; nothing here decides authorization or business outcomes.
 The edge only does transport work: Host/Origin checks, body limits, abuse throttling, request ids, safe logging.
@@ -31,7 +31,7 @@ from .service import MemoryService
 
 log = logging.getLogger("memory_server.http")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
-PROTECTED_PREFIXES = ("/v1/", "/mcp")
+PROTECTED_PREFIXES = ("/v2/", "/mcp")
 
 
 class SlidingWindow(object):
@@ -250,7 +250,7 @@ def create_app(config):
             return _json(200 if replayed else 202, dict(body, request_id=rid))
         return _json(status, dict(out, request_id=rid))
 
-    @mcp.custom_route("/v1/experiences", methods=["POST"])
+    @mcp.custom_route("/v2/experiences", methods=["POST"])
     async def submit(request: Request):
         try:
             body = await payload(request)
@@ -258,7 +258,7 @@ def create_app(config):
             return error_response(exc, request.state.request_id)
         return await run(request, service.submit, token_of(request), body, request.headers.get("idempotency-key"))
 
-    @mcp.custom_route("/v1/memories/search", methods=["POST"])
+    @mcp.custom_route("/v2/memories/search", methods=["POST"])
     async def search(request: Request):
         try:
             body = await payload(request)
@@ -266,11 +266,11 @@ def create_app(config):
             return error_response(exc, request.state.request_id)
         return await run(request, service.search, token_of(request), body)
 
-    @mcp.custom_route("/v1/jobs/{job_id}", methods=["GET"])
+    @mcp.custom_route("/v2/jobs/{job_id}", methods=["GET"])
     async def job(request: Request):
         return await run(request, service.get_job, token_of(request), request.path_params["job_id"])
 
-    @mcp.custom_route("/v1/experiences/{experience_id}", methods=["GET"])
+    @mcp.custom_route("/v2/experiences/{experience_id}", methods=["GET"])
     async def experience(request: Request):
         return await run(request, service.get_experience, token_of(request), request.path_params["experience_id"])
 

@@ -8,46 +8,18 @@ import sys
 import uuid
 from dataclasses import replace
 
-import psycopg2
 import pytest
 
 from memory_server import admin, ledger, operations, recovery
 from memory_server.config import Config
 from memory_server.db import connect
 from memory_server.errors import ServiceError
-from memory_server.migrate import migrate
 from memory_server.service import MemoryService
 from memory_server.worker import Worker
 
 from conftest import HMAC_KEY
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL is not set")
-
-
-@pytest.fixture
-def make_db():
-    admin_url = os.environ["TEST_DATABASE_URL"]
-    created = []
-
-    def make(migrated=False):
-        name = "rec_" + uuid.uuid4().hex[:8]
-        conn = psycopg2.connect(admin_url)
-        conn.autocommit = True
-        conn.cursor().execute('CREATE DATABASE "%s" ENCODING \'UTF8\' TEMPLATE template0' % name)
-        conn.close()
-        url = admin_url.rsplit("/", 1)[0] + "/" + name
-        created.append(name)
-        if migrated:
-            migrate(url)
-        return url
-    yield make
-    conn = psycopg2.connect(admin_url)
-    conn.autocommit = True
-    cur = conn.cursor()
-    for name in created:
-        cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s", (name,))
-        cur.execute('DROP DATABASE IF EXISTS "%s"' % name)
-    conn.close()
 
 
 @pytest.fixture
@@ -59,7 +31,7 @@ def pw(tmp_path):
 
 
 class Fixture:
-    """Source database with a ledger; A and B share a namespace with an explicit memory each."""
+    """Source database with a ledger; A and B share the memory store with an explicit memory each."""
 
     def __init__(self, make_db, tmp_path):
         self.make_db = make_db
@@ -69,14 +41,13 @@ class Fixture:
         self.url = make_db(migrated=True)
         self.config = Config(database_url=self.url, hmac_key=HMAC_KEY.encode(), policy_ledger=self.ledger)
         self.svc = MemoryService(self.config)
-        self.ns = admin.create_namespace(self.url, "rec-ns")["namespace_id"]
         self.a = admin.create_principal(self.url, "dev-a")
         self.b = admin.create_principal(self.url, "dev-b")
         for p in (self.a, self.b):
-            admin.grant(self.url, p["principal_id"], self.ns, write=True, ledger_path=self.ledger)
+            admin.set_permissions(self.url, p["principal_id"], write=True, ledger_path=self.ledger)
 
     def remember(self, token, key, text):
-        receipt, _ = self.svc.submit(token, {"namespace_id": self.ns, "content": {"media_type": "text/plain",
+        receipt, _ = self.svc.submit(token, {"content": {"media_type": "text/plain",
                                                                                    "text": text},
                                              "submission": {"intent": "explicit_memory",
                                                             "actor_reported": "user"}}, key)
@@ -86,7 +57,7 @@ class Fixture:
         Worker(config or self.config, "w").run_until_idle()
 
     def search(self, token, query, svc=None):
-        return (svc or self.svc).search(token, {"namespace_id": self.ns, "query": query})["results"]
+        return (svc or self.svc).search(token, {"query": query})["results"]
 
     def archive(self, passphrase):
         return recovery.backup(self.config, self.url, str(self.tmp / "bk"), passphrase)["archive"]
@@ -121,7 +92,7 @@ def test_old_backup_does_not_resurrect_deleted_or_revoked_state(fx, pw):
     # 1. Quarantined: nothing is served, even to a credential that is valid in the backup.
     for token in (fx.a["token"], fx.b["token"]):
         with pytest.raises(ServiceError) as err:
-            rsvc.search(token, {"namespace_id": fx.ns, "query": "gonemarker"})
+            rsvc.search(token, {"query": "gonemarker"})
         assert err.value.code == "RECOVERY_QUARANTINE"
     # 2. The raw restored data really would re-expose: verification catches it (proves the check has teeth).
     before = recovery.verify_restore(fx.config, url)
@@ -141,7 +112,7 @@ def test_old_backup_does_not_resurrect_deleted_or_revoked_state(fx, pw):
     assert fx.search(fx.b["token"], "gonemarker", rsvc) == []            # deleted memory stays gone
     assert len(fx.search(fx.b["token"], "keepmarker", rsvc)) == 1         # shared data survives A's revocation
     with pytest.raises(ServiceError) as err:
-        rsvc.search(fx.a["token"], {"namespace_id": fx.ns, "query": "keepmarker"})
+        rsvc.search(fx.a["token"], {"query": "keepmarker"})
     assert err.value.status == 401                                         # revoked credential stays revoked
     rows = _rows(url, "SELECT count(*) AS n FROM experiences WHERE id = %s AND raw_text IS NOT NULL",
                  (gone["experience_id"],))
@@ -149,14 +120,14 @@ def test_old_backup_does_not_resurrect_deleted_or_revoked_state(fx, pw):
     assert keep["experience_id"]
 
 
-def test_grant_reduction_is_replayed_but_never_widened(fx, pw):
+def test_permission_reduction_is_replayed_but_never_widened(fx, pw):
     fx.remember(fx.a["token"], "k1", "grantmarker content")
     fx.drain()
     archive = fx.archive(pw)
-    admin.grant(fx.url, fx.b["principal_id"], fx.ns, read=True, write=False, ledger_path=fx.ledger)
+    admin.set_permissions(fx.url, fx.b["principal_id"], read=True, write=False, ledger_path=fx.ledger)
     url, rconfig, _ = fx.restored(archive, pw)
     recovery.reapply(rconfig, url)
-    rows = _rows(url, "SELECT can_read, can_write FROM namespace_grants WHERE principal_id = %s",
+    rows = _rows(url, "SELECT can_read, can_write FROM principals WHERE id = %s",
                  (fx.b["principal_id"],))
     assert rows[0]["can_read"] is True and rows[0]["can_write"] is False
 
@@ -258,11 +229,16 @@ def test_archive_is_encrypted_and_needs_the_passphrase(fx, pw, tmp_path):
         recovery.restore(fx.config, fx.make_db(), archive, str(wrong))
 
 
-def test_restore_warns_when_hmac_key_differs(fx, pw):
+def test_restore_cannot_release_with_a_different_receipt_hmac_key(fx, pw):
     archive = fx.archive(pw)
     other = replace(fx.config, hmac_key=b"a-different-key-0123456789abcdefghijklmn")
-    info = recovery.restore(other, fx.make_db(), archive, pw)
+    target = fx.make_db()
+    info = recovery.restore(other, target, archive, pw)
     assert any("HMAC" in w for w in info["warnings"])
+    recovery.reapply(other, target)
+    with pytest.raises(recovery.RecoveryError, match="HMAC"):
+        recovery.release(other, target, attest_ledger_is_latest=True)
+    assert recovery.release(fx.config, target, attest_ledger_is_latest=True)["state"] == "serving"
 
 
 def test_cli_roundtrip_and_no_secret_in_output(fx, pw, tmp_path):
@@ -319,3 +295,16 @@ def _rows(url, sql, params=()):
             return cur.fetchall()
     finally:
         conn.close()
+
+
+def test_new_restore_requires_its_own_ledger_replay(fx, pw, tmp_path):
+    first, first_config, _ = fx.restored(fx.archive(pw), pw)
+    recovery.reapply(first_config, first)
+    recovery.release(first_config, first, attest_ledger_is_latest=True)
+    next_archive = recovery.backup(first_config, first, str(tmp_path / "second-backup"), pw)["archive"]
+    second, second_config, _ = fx.restored(next_archive, pw)
+    assert recovery.verify_restore(second_config, second)["ok"]
+    with pytest.raises(recovery.RecoveryError, match="this restore has not re-applied"):
+        recovery.release(second_config, second, attest_ledger_is_latest=True)
+    recovery.reapply(second_config, second)
+    assert recovery.release(second_config, second, attest_ledger_is_latest=True)["state"] == "serving"

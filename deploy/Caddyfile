@@ -1,4 +1,4 @@
-# TLS terminating reverse proxy. Only /mcp and /v1/* reach the application; health endpoints stay internal.
+# TLS terminating reverse proxy. Only /mcp and /v2/* reach the application; health endpoints stay internal.
 # Certificates are mounted from ./certs (see docs/operations/deployment.md for dev CA, own certs or ACME).
 {
 	auto_https off
@@ -12,7 +12,7 @@
 	request_body {
 		max_size 128KB
 	}
-	@exposed path /mcp /mcp/* /v1/*
+	@exposed path /mcp /mcp/* /v2/*
 	handle @exposed {
 		reverse_proxy api:8080 {
 			transport http {

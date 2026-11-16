@@ -85,24 +85,23 @@ def stack():
     dc("up", "-d", "--wait", timeout=300)
     wait_ready()
     tag = uuid.uuid4().hex[:6]
-    ns = admin("create-namespace", "--name", "e2e-" + tag)["namespace_id"]
     dev = {}
     for name in ("a", "b", "mgr"):
         dev[name] = admin("create-principal", "--name", "%s-%s" % (name, tag))
         flags = ["--read", "--write"] + (["--manage"] if name == "mgr" else [])
-        admin("grant", "--principal", dev[name]["principal_id"], "--namespace", ns, *flags)
-    return {"ns": ns, "dev": dev, "tag": tag}
+        admin("set-permissions", "--principal", dev[name]["principal_id"], *flags)
+    return {"dev": dev, "tag": tag}
 
 
 def submit(stack, who, key, text, **extra):
-    args = {"namespace_id": stack["ns"], "text": text, "idempotency_key": key, "intent": "explicit_memory",
+    args = {"text": text, "idempotency_key": key, "intent": "explicit_memory",
             "actor_reported": "user"}
     args.update(extra)
     return tool(stack["dev"][who]["token"], "memory_submit", args)
 
 
 def search(stack, who, query):
-    res = tool(stack["dev"][who]["token"], "memory_search", {"namespace_id": stack["ns"], "query": query})
+    res = tool(stack["dev"][who]["token"], "memory_search", {"query": query})
     return res
 
 
@@ -110,12 +109,12 @@ def search(stack, who, query):
 def test_only_tls_is_served_and_internal_ports_are_not_published(stack):
     ctx = ssl.create_default_context(cafile=CA)
     with pytest.raises(urllib.error.HTTPError) as err:
-        urllib.request.urlopen(urllib.request.Request(BASE + "/v1/jobs/" + str(uuid.uuid4())), context=ctx)
+        urllib.request.urlopen(urllib.request.Request(BASE + "/v2/jobs/" + str(uuid.uuid4())), context=ctx)
     assert err.value.code == 401                                            # TLS works, auth is enforced
     with pytest.raises(urllib.error.URLError):                              # an unknown CA must be rejected by clients
-        urllib.request.urlopen(BASE + "/v1/jobs/x", context=ssl.create_default_context())
+        urllib.request.urlopen(BASE + "/v2/jobs/x", context=ssl.create_default_context())
     plain = subprocess.run(["curl", "-s", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}",
-                            "http://localhost:8443/v1/jobs/x"], stdout=subprocess.PIPE, universal_newlines=True)
+                            "http://localhost:8443/v2/jobs/x"], stdout=subprocess.PIPE, universal_newlines=True)
     assert plain.stdout in ("400", "000")                                   # plaintext HTTP is never served
     ports = subprocess.run(["docker", "ps", "--filter", "label=com.docker.compose.project=memory", "--format",
                             "{{.Names}} {{.Ports}}"], stdout=subprocess.PIPE, universal_newlines=True).stdout
@@ -126,7 +125,7 @@ def test_only_tls_is_served_and_internal_ports_are_not_published(stack):
             urllib.request.urlopen(BASE + hidden, context=ctx)
         assert err.value.code == 404
     with pytest.raises(urllib.error.HTTPError) as err:                      # a wrong Host is refused by the app
-        urllib.request.urlopen(urllib.request.Request(BASE + "/v1/jobs/x", headers={"Host": "evil.example"}),
+        urllib.request.urlopen(urllib.request.Request(BASE + "/v2/jobs/x", headers={"Host": "evil.example"}),
                                context=ctx)
     assert err.value.code in (404, 421)
     assert psql("SELECT rolsuper FROM pg_roles WHERE rolname = 'memory_app'") == "f"
@@ -193,8 +192,8 @@ def test_api_and_database_restarts_keep_data_and_degrade_safely(stack):
     wait_ready()
     assert len(search(stack, "b", "queuedterm").structured_content["results"]) == 1
     dc("stop", "db")
-    req = urllib.request.Request(BASE + "/v1/memories/search", method="POST",
-                                 data=json.dumps({"namespace_id": stack["ns"], "query": "queuedterm"}).encode(),
+    req = urllib.request.Request(BASE + "/v2/memories/search", method="POST",
+                                 data=json.dumps({"query": "queuedterm"}).encode(),
                                  headers={"Authorization": "Bearer " + stack["dev"]["b"]["token"],
                                           "Content-Type": "application/json"})
     with pytest.raises(urllib.error.HTTPError) as err:                         # DB is down: a safe, retryable 503
@@ -213,14 +212,14 @@ def test_api_and_database_restarts_keep_data_and_degrade_safely(stack):
 
 def test_full_stack_restart_while_input_gate_is_paused(stack):
     mgr = stack["dev"]["mgr"]["principal_id"]
-    active = psql("SELECT active_generation_id FROM namespaces WHERE id = '%s'" % stack["ns"])
-    gen = admin("start-generation", "--principal", mgr, "--namespace", stack["ns"], "--expected-active", active,
+    active = psql("SELECT active_generation_id FROM system_control")
+    gen = admin("start-generation", "--principal", mgr, "--expected-active", active,
                 "--engine-version", "2")["generation_id"]
-    assert psql("SELECT write_gate FROM namespaces WHERE id = '%s'" % stack["ns"]) == "paused"
+    assert psql("SELECT write_gate FROM system_control") == "paused"
     dc("down")                                                               # whole stack; volumes are kept
     dc("up", "-d", "--wait", timeout=300)
     wait_ready()
-    assert psql("SELECT write_gate FROM namespaces WHERE id = '%s'" % stack["ns"]) == "paused"
+    assert psql("SELECT write_gate FROM system_control") == "paused"
     res = submit(stack, "b", "e2e-paused", "must wait pausedterm")
     assert res.is_error and res.structured_content["error"]["retryable"] is True   # gate survived the restart
     admin("abort-generation", "--principal", mgr, "--generation", gen, "--expected-active", active)

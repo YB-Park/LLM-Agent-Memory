@@ -41,18 +41,16 @@ def test_reference_1_projects_whole_experience(world):
     assert art["payload"]["verification"] == "not_assessed" and art["payload"]["evidence_status"] == "not_applicable"
     [src] = world.query("SELECT spans FROM artifact_sources WHERE artifact_id = %s", (art["id"],))
     assert src["spans"] == {"start_byte": 0, "end_byte": len(MULTI.encode("utf-8"))}
-    assert str(world.job(r["job_id"])["generation_id"]) == world.personal["generation_id"]
+    assert str(world.job(r["job_id"])["generation_id"]) == world.active_generation_id
 
 
 def test_reference_2_projects_paragraphs_with_byte_spans(database_url, config):
-    from memory_server import admin
     from conftest import World
     w = World(config)
-    ns = admin.create_namespace(w.dsn, "ref2-ns", engine_version="2")
-    admin.grant(w.dsn, w.a["principal_id"], ns["namespace_id"], write=True)
-    r = w.svc.submit(w.a["token"], w.body(MULTI, ns["namespace_id"]), "p2")[0]
+    w.switch_engine("2")
+    r = w.svc.submit(w.a["token"], w.body(MULTI), "p2")[0]
     w.drain()
-    arts = w.artifacts(ns["namespace_id"])
+    arts = w.artifacts()
     assert [a["local_key"] for a in arts] == ["0", "1", "2"]
     raw = MULTI.encode("utf-8")
     for a in arts:
@@ -60,32 +58,28 @@ def test_reference_2_projects_paragraphs_with_byte_spans(database_url, config):
         assert raw[src["spans"]["start_byte"]:src["spans"]["end_byte"]].decode("utf-8") == a["display_text"]
         assert a["payload"]["representation"] == "source_projection_paragraph"
     assert arts[2]["display_text"] == "셋째 문단 foo_bar\n둘째 줄"
-    assert str(w.job(r["job_id"])["generation_id"]) == ns["generation_id"]
+    assert str(w.job(r["job_id"])["generation_id"]) == w.active_generation_id
 
 
 def test_reference_2_keeps_explicit_memory_as_single_artifact(database_url, config):
-    from memory_server import admin
     from conftest import World
     w = World(config)
-    ns = admin.create_namespace(w.dsn, "ref2-explicit", engine_version="2")
-    admin.grant(w.dsn, w.a["principal_id"], ns["namespace_id"], write=True)
-    w.explicit(w.a["token"], "x1", MULTI, namespace_id=ns["namespace_id"])
+    w.switch_engine("2")
+    w.explicit(w.a["token"], "x1", MULTI)
     w.drain()
-    [art] = w.artifacts(ns["namespace_id"])
+    [art] = w.artifacts()
     assert art["display_text"] == MULTI and art["payload"]["representation"] == "explicit_memory"
 
 
 def test_reference_2_output_limit_fails_without_partial_save(database_url, config):
-    from memory_server import admin
     from conftest import World
     w = World(config)
-    ns = admin.create_namespace(w.dsn, "ref2-limit", engine_version="2")
-    admin.grant(w.dsn, w.a["principal_id"], ns["namespace_id"], write=True)
+    w.switch_engine("2")
     text = "\n\n".join("p%d" % i for i in range(257))
-    r = w.svc.submit(w.a["token"], w.body(text, ns["namespace_id"]), "lim")[0]
+    r = w.svc.submit(w.a["token"], w.body(text), "lim")[0]
     [o] = w.drain()
     assert (o.kind, o.code) == (FAILED, "OUTPUT_LIMIT")
-    assert w.artifacts(ns["namespace_id"]) == [] and w.job(r["job_id"])["state"] == "failed"
+    assert w.artifacts() == [] and w.job(r["job_id"])["state"] == "failed"
 
 
 # --- T3: claim, lease, stale attempt ------------------------------------
@@ -176,7 +170,7 @@ def test_t4_crash_before_commit_publishes_nothing_and_retry_succeeds(world):
     with pytest.raises(RuntimeError):
         w.process_one()
     hooks.clear()
-    assert world.artifacts() == [] and world.query("SELECT count(*) AS n FROM artifact_sources WHERE namespace_id = %s", (world.ns,))[0]["n"] == 0
+    assert world.artifacts() == [] and world.query("SELECT count(*) AS n FROM artifact_sources ")[0]["n"] == 0
     job = world.job(r["job_id"])
     assert job["state"] == "running" and job["output_count"] is None  # not succeeded, not visible
     assert world.search(world.a["token"], "원자적 공개")["results"] == []
@@ -303,7 +297,7 @@ def test_permanent_engine_error_is_not_retried(world):
 def test_unknown_engine_version_fails_without_output(world):
     r = world.explicit(world.a["token"], "nover", "엔진 없음")
     world.query("UPDATE generations SET engine_spec = jsonb_set(engine_spec, '{version}', '\"99\"') WHERE id = %s",
-                (world.personal["generation_id"],))
+                (world.active_generation_id,))
     [o] = world.drain()
     assert (o.kind, o.code) == (FAILED, "ENGINE_VERSION_UNAVAILABLE")
     assert world.artifacts() == [] and world.job(r["job_id"])["state"] == "failed"

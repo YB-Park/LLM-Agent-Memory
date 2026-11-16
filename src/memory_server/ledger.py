@@ -18,7 +18,7 @@ import json
 import os
 
 GENESIS = "0" * 64
-TYPES = ("delete_experience", "revoke_principal", "grant_reduce")
+TYPES = ("delete_experience", "revoke_principal", "grant_reduce", "permission_reduce")
 
 
 class LedgerError(Exception):

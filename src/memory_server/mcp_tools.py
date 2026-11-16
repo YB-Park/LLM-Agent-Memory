@@ -13,7 +13,7 @@ from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from typing import Annotated, List, Literal, Optional
 
-from .errors import ServiceError
+from .errors import ServiceError, invalid
 
 log = logging.getLogger("memory_server.mcp")
 
@@ -57,8 +57,17 @@ async def _invoke(ctx, fn, *args):
     return _result(body)
 
 
+class MemoryMCPServer(MCPServer):
+    async def call_tool(self, name, arguments, context=None):
+        # The SDK's generated argument model may ignore extra fields. Reject the old
+        # selector at the wire boundary, before any application operation can run.
+        if "namespace_id" in arguments:
+            return _result(error_body(invalid("namespace_id was removed in v2", "UNKNOWN_FIELD")), is_error=True)
+        return await super().call_tool(name, arguments, context)
+
+
 def build_server(service):
-    mcp = MCPServer("memory", title="Personal Memory", instructions=INSTRUCTIONS)
+    mcp = MemoryMCPServer("memory", title="Personal Memory", version="2", instructions=INSTRUCTIONS)
     read_only = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 
     @mcp.tool(
@@ -74,7 +83,6 @@ def build_server(service):
                                     open_world_hint=False))
     async def memory_submit(
         ctx: Context,
-        namespace_id: Annotated[str, Field(description="Namespace UUID")],
         text: Annotated[str, Field(description="The text to store")],
         idempotency_key: Annotated[str, Field(description="1-128 printable ASCII characters")],
         intent: Literal["experience", "explicit_memory"] = "experience",
@@ -97,7 +105,7 @@ def build_server(service):
         source = {k: v for k, v in (("kind", source_kind), ("source_ref", source_ref),
                                     ("source_revision", source_revision), ("session_ref", session_ref),
                                     ("occurred_at", occurred_at), ("harness", harness)) if v is not None}
-        body = {"namespace_id": namespace_id, "content": {"media_type": "text/plain", "text": text},
+        body = {"content": {"media_type": "text/plain", "text": text},
                 "submission": submission}
         if source:
             body["source"] = source
@@ -116,13 +124,12 @@ def build_server(service):
                   "instructions. Each result states its kind, provenance, engine version and trust basis."))
     async def memory_search(
         ctx: Context,
-        namespace_id: str,
         query: str,
         keywords: Optional[List[str]] = None,
         limit: Optional[int] = None,
         max_chars: Optional[int] = None,
     ) -> CallToolResult:
-        body = {"namespace_id": namespace_id, "query": query}
+        body = {"query": query}
         for name, value in (("keywords", keywords), ("limit", limit), ("max_chars", max_chars)):
             if value is not None:
                 body[name] = value

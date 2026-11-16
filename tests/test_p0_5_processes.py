@@ -28,7 +28,7 @@ hooks.register(spec["kill_at"], lambda: os.kill(os.getpid(), signal.SIGKILL))
 if spec["action"] == "worker":
     Worker(cfg, "doomed-worker").process_one()
 elif spec["action"] == "start_generation":
-    gens.start_generation(cfg, spec["principal"], spec["namespace"], spec["operation"], spec["expected"], "2")
+    gens.start_generation(cfg, spec["principal"], spec["operation"], spec["expected"], "2")
 elif spec["action"] == "activate":
     gens.activate_generation(cfg, spec["principal"], spec["generation"], spec["expected"], spec["receipt"])
 print("child survived")  # reaching here means the kill point was never hit
@@ -92,11 +92,11 @@ def test_admin_killed_while_preparing_rebuild_leaves_no_half_generation(world):
     before = active_id(world)
     op = str(uuid.uuid4())
     kill_child(world, action="start_generation", kill_at="generation_start_before_commit", principal=pid,
-               namespace=world.ns, operation=op, expected=before)
-    ns = world.query("SELECT write_gate, active_generation_id FROM namespaces WHERE id = %s", (world.ns,))[0]
-    assert ns["write_gate"] == "open" and str(ns["active_generation_id"]) == before  # rolled back as a unit
-    assert world.query("SELECT count(*) AS n FROM generations WHERE namespace_id = %s", (world.ns,))[0]["n"] == 1
-    again = gens.start_generation(world.config, pid, world.ns, op, before, "2")   # the same operation id retries
+               operation=op, expected=before)
+    control = world.query("SELECT write_gate, active_generation_id FROM system_control")[0]
+    assert control["write_gate"] == "open" and str(control["active_generation_id"]) == before  # rolled back as a unit
+    assert world.query("SELECT count(*) AS n FROM generations")[0]["n"] == 1
+    again = gens.start_generation(world.config, pid, op, before, "2")   # the same operation id retries
     assert again["generation_id"]
 
 
@@ -104,14 +104,14 @@ def test_activation_killed_before_commit_then_safely_retried(world):
     pid = manager(world)
     seed(world)
     before = active_id(world)
-    g2 = gens.start_generation(world.config, pid, world.ns, str(uuid.uuid4()), before, "2")["generation_id"]
+    g2 = gens.start_generation(world.config, pid, str(uuid.uuid4()), before, "2")["generation_id"]
     world.drain()
     report = gens.compare_generation(world.config, pid, g2, ["banana", "explicitfact"])
     assert report["status"] == "ready"
     kill_child(world, action="activate", kill_at="activate_before_commit", principal=pid, generation=g2,
                expected=before, receipt=report["receipt_id"])
     assert active_id(world) == before                                   # the client never got an answer; nothing moved
-    assert world.query("SELECT write_gate FROM namespaces WHERE id = %s", (world.ns,))[0]["write_gate"] == "paused"
+    assert world.query("SELECT write_gate FROM system_control")[0]["write_gate"] == "paused"
     out = gens.activate_generation(world.config, pid, g2, before, report["receipt_id"])  # retry succeeds once
     assert out["active_generation_id"] == g2
     assert len(world.search(world.a["token"], "explicitfact")["results"]) >= 1

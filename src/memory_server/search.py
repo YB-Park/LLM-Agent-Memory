@@ -1,7 +1,7 @@
 """Search over the active generation: reference-keywords/v1 and literal-substring/v1 (§7, §7.1).
 
 Runs inside the caller's transaction, which already holds the control lock (SHARE) and has verified the
-principal's read grant. Normalized strings are passed as SQL parameters; no user text becomes a pattern.
+principal's read permission. Normalized strings are passed as SQL parameters; no user text becomes a pattern.
 There is no raw-text fallback: only valid artifacts whose provenance experiences are all retained
 are candidates, in the active generation only.
 """
@@ -18,13 +18,13 @@ MAX_EXPLICIT_KEYWORDS = 8
 MAX_KEYWORD_CHARS = 64
 DEFAULT_LIMIT, MAX_LIMIT = 5, 20
 DEFAULT_CHARS, MAX_CHARS = 4000, 16000
-_FIELDS = {"namespace_id", "query", "keywords", "limit", "max_chars"}
+_FIELDS = {"query", "keywords", "limit", "max_chars"}
 
 _VALID_AND_RETAINED = """
-    a.namespace_id = %(ns)s AND a.generation_id = %(gen)s AND a.state = 'valid' AND j.state = 'succeeded'
+    a.generation_id = %(gen)s AND a.state = 'valid' AND j.state = 'succeeded'
     AND EXISTS (SELECT 1 FROM artifact_sources s WHERE s.artifact_id = a.id)
     AND NOT EXISTS (SELECT 1 FROM artifact_sources s
-                    JOIN experiences e ON e.id = s.experience_id AND e.namespace_id = s.namespace_id
+                    JOIN experiences e ON e.id = s.experience_id
                                       AND e.source_version = s.source_version
                     WHERE s.artifact_id = a.id AND e.state <> 'retained')
 """
@@ -66,7 +66,7 @@ LIMIT %(limit)s
 _SOURCES_SQL = """
 SELECT s.artifact_id, s.experience_id, s.source_version, s.spans, e.received_at, e.source_metadata
 FROM artifact_sources s
-JOIN experiences e ON e.id = s.experience_id AND e.namespace_id = s.namespace_id
+JOIN experiences e ON e.id = s.experience_id
                   AND e.source_version = s.source_version
 WHERE s.artifact_id = ANY(%s::uuid[]) AND e.state = 'retained'
 ORDER BY s.artifact_id, s.experience_id
@@ -128,11 +128,11 @@ def _excerpt(display, search_text, matched_body, budget):
     return display[start:end], True
 
 
-def run(cur, namespace_id, generation, body):
+def run(cur, generation, body):
     """generation: row with id, engine_spec, index_profile. Returns the response body (no request_id)."""
     profile = generation["index_profile"]
     query, terms, limit, max_chars = parse_request(body, profile)
-    params = {"ns": namespace_id, "gen": generation["id"], "limit": limit + 1}
+    params = {"gen": generation["id"], "limit": limit + 1}
     if profile == "literal-substring/v1":
         params["q"] = terms[0]
         cur.execute(_LITERAL_SQL, params)
@@ -185,12 +185,12 @@ def run(cur, namespace_id, generation, body):
     cur.execute("SELECT count(*) FILTER (WHERE j.state IN ('queued', 'running')) AS pending, "
                 "count(*) FILTER (WHERE j.state = 'failed') AS failed FROM jobs j "
                 "JOIN experiences e ON e.id = j.experience_id AND e.state = 'retained' "
-                "WHERE j.namespace_id = %s AND j.generation_id = %s", (namespace_id, generation["id"]))
+                "WHERE j.generation_id = %s", (generation["id"],))
     idx = cur.fetchone()
     return {
         "generation_id": str(generation["id"]), "engine": engine_label(generation["engine_spec"]),
         "status": "ok", "index_profile": profile, "effective_keywords": terms,
-        "indexing": {"scope": "namespace", "has_pending": idx["pending"] > 0, "has_failed": idx["failed"] > 0},
+        "indexing": {"has_pending": idx["pending"] > 0, "has_failed": idx["failed"] > 0},
         "results": results, "truncated": more or budget_hit or len(results) < len(rows),
         "content_trust": "untrusted_data",
     }
