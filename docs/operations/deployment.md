@@ -79,9 +79,11 @@ docker compose ps                         # migrate는 Exited(0), api/worker/pro
 
 Caddy는 `./certs/server.crt`·`server.key`를 읽는다(`auto_https off`, TLS 1.2+). 선택지:
 
-1. **개발·시험**: `./scripts/dev-certs.sh` — 30일짜리 임시 CA와 localhost 인증서. 클라이언트가 CA를 신뢰해야 한다. **시험 전용.**
+1. **개발·시험**: 표준 Linux Docker에서 깨끗한 테스트 디렉터리의 `./scripts/dev-certs.sh`를 root로 실행하면 30일짜리 임시 CA와 localhost 인증서가 생성된다. 클라이언트는 테스트 CA를 신뢰하도록 설정한다. **시험 전용.**
 2. **자체 인증서/사설 CA**: 두 파일을 배치하고 클라이언트에 CA를 설치.
 3. **ACME(Let's Encrypt)**: `deploy/Caddyfile`의 `auto_https off`·`tls` 지시문을 도메인 블록과 자동 HTTPS로 바꾸고 80/443을 게시한다. **구성하지도 시험하지도 않았다.**
+
+Caddy는 `NET_BIND_SERVICE` 외의 capability를 제거한 상태로 실행한다. bind mount한 인증서 디렉터리와 키는 컨테이너의 Caddy 사용자가 읽을 수 있어야 한다. 비root 호스트 사용자가 만든 접근 제한 디렉터리와 키를 그대로 마운트하면 Caddy 시작이 실패할 수 있다. 서버 키의 읽기 권한은 Caddy와 운영자로 제한한다.
 
 평문 HTTP 8080은 `edge`/`backend` 내부 네트워크에만 있다. 시험에서 호스트 8443에 평문 HTTP를 보내면 400이었고 8080/5432는 호스트에 게시되지 않았다.
 

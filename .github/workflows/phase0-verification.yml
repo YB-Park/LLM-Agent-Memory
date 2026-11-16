@@ -34,16 +34,21 @@ jobs:
           persist-credentials: false
       - name: Prepare a throwaway stack
         run: |
+          docker compose --profile tools build
           ./scripts/gen-secrets.sh
-          ./scripts/dev-certs.sh
+          sudo ./scripts/dev-certs.sh
           python3 -m venv "$RUNNER_TEMP/memory-test-venv"
           "$RUNNER_TEMP/memory-test-venv/bin/python" -m pip install -r requirements.txt pytest
-          docker compose --profile tools build
       - name: Run existing E2E scenarios
         # The recovery test gives the backup directory to container UID 10001 and reads the mode-0600 archive.
         run: |
           sudo env E2E_COMPOSE=1 MEMORY_ALLOWED_HOSTS=localhost \
             "$RUNNER_TEMP/memory-test-venv/bin/python" -m pytest --noconftest -q --tb=short tests/test_p0_5_compose_e2e.py
+      - name: Diagnose a failed stack
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=50 proxy
       - name: Remove the throwaway stack
         if: always()
         run: docker compose --profile tools down --volumes --remove-orphans
