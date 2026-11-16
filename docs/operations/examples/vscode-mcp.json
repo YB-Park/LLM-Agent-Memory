@@ -1,0 +1,21 @@
+{
+  // 예시: 이 파일을 VS Code 사용자/워크스페이스의 mcp.json에 복사한다. 비밀은 포함하지 않는다.
+  // 토큰은 처음 사용할 때 VS Code가 묻고(password 입력) 비밀 저장소에 보관한다.
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "memory-token",
+      "description": "이 기기용 Memory credential (admin create-principal 출력)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "personal-memory": {
+      "type": "http",
+      "url": "https://memory.example.net:8443/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:memory-token}"
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+# Baseline verification image: Ubuntu 24.04 LTS (supported) with distro Python 3.12 + PostgreSQL 16.
+# Package versions are printed by run-tests-in-container.sh.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates postgresql-16 python3 python3-venv python3-psycopg2 python3-pytest gnupg \
+ && rm -rf /var/lib/apt/lists/*
+# Pinned MCP/ASGI stack in a venv that still sees the distro psycopg2/pytest.
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m venv --system-site-packages /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir -q -r /tmp/requirements.txt
+ENV PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+COPY migrations ./migrations
+COPY src ./src
+COPY tests ./tests
+COPY scripts/run-tests-in-container.sh ./scripts/run-tests-in-container.sh
+
+ENTRYPOINT ["/app/scripts/run-tests-in-container.sh"]
