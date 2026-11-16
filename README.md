@@ -13,6 +13,17 @@ LLM/Agent Harness에 종속되지 않는 **개인 소유 장기 에이전트 메
 
 **[Phase 0 구현 트래커 — Issue #6](https://github.com/YB-Park/LLM-Agent-Memory/issues/6)**에서 P0-0~P0-5 구현과 검증을 추적합니다. 현재 세부 구현에서는 3번 문서를 우선 참조하되, 상위 설계 원칙을 위반해서는 안 됩니다.
 
+## 사내망 이전 전: 장기 설계·연구 배경 보존
+
+이 프로젝트는 사내망의 **외부 코드/데이터 반출 금지 환경**으로 이전될 수 있다. 외부 GitHub·기존 대화·논문 사이트에 접속하지 못해도 배경을 이해할 수 있도록 Phase 0 구현 문서와 별도로 다음 맥락을 기록했다.
+
+- **[프로젝트 배경과 설계 방향](docs/context/project-background.md)** — 왜 만들었는지, 중요하게 구분한 개념, 합의·보류·미결정 사항
+- **[Hindsight · MemoryLACE 연구 인사이트](docs/research/hindsight-memorylace-insights.md)** — 연구 내용과 우리가 얻은 통찰을 구분. 특정 엔진 채택 결정이 아님
+- **[향후 연구 질문과 평가 관점](docs/research/future-experiments-and-questions.md)** — 추출·통합·검색·시간·망각·재활성화·평가의 열린 질문; 고정 로드맵이 아님
+- **[격리망 이전 핸드오프](docs/context/offline-handoff.md)** — 이전 전 테스트·미검증의 경계, 승인된 반입·오프라인 재현·보안 주의사항
+
+**격리 이후의 실제 코드·설정·로그·조직 데이터는 GitHub나 공개 LLM/외부 서비스로 반출하지 않는다.** 이후 내부에서 달라진 결정과 시험 결과는 사내에서 승인된 저장소·문서가 최신 기준이다.
+
 ## Phase 0의 경계
 
 - **기본 구조:** 개인용 원격 MCP + REST Adapter, Modular Monolith, Background Worker, PostgreSQL. 작은 UTF-8 텍스트 원본·접수/Job을 같은 PostgreSQL 트랜잭션에 기록.
