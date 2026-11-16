@@ -1,0 +1,49 @@
+name: Phase 0 verification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    name: PostgreSQL and GnuPG 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run integration and recovery tests
+        run: ./scripts/verify.sh -q -rs
+
+  compose:
+    name: Compose and TLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      MEMORY_ALLOWED_HOSTS: localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Prepare a throwaway stack
+        run: |
+          ./scripts/gen-secrets.sh
+          ./scripts/dev-certs.sh
+          python3 -m venv "$RUNNER_TEMP/memory-test-venv"
+          "$RUNNER_TEMP/memory-test-venv/bin/python" -m pip install -r requirements.txt pytest
+          docker compose --profile tools build
+      - name: Run existing E2E scenarios
+        # The recovery test gives the backup directory to container UID 10001 and reads the mode-0600 archive.
+        run: |
+          sudo env E2E_COMPOSE=1 MEMORY_ALLOWED_HOSTS=localhost \
+            "$RUNNER_TEMP/memory-test-venv/bin/python" -m pytest --noconftest -q --tb=short tests/test_p0_5_compose_e2e.py
+      - name: Remove the throwaway stack
+        if: always()
+        run: docker compose --profile tools down --volumes --remove-orphans

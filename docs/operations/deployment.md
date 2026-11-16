@@ -57,7 +57,7 @@ docker compose ps                         # migrate는 Exited(0), api/worker/pro
 | 변수 | 의미 |
 | --- | --- |
 | `MEMORY_DATABASE_URL[_FILE]` | 런타임 DB 연결(`memory_app`) |
-| `MEMORY_HMAC_KEY[_FILE]` | credential 다이제스트 HMAC 키(32자 이상) |
+| `MEMORY_HMAC_KEY[_FILE]` | 접수 키와 요청 다이제스트용 HMAC 키(32자 이상) |
 | `MEMORY_MIGRATION_DATABASE_URL[_FILE]`, `MEMORY_RUNTIME_ROLE`, `MEMORY_BACKUP_ROLE` | `migrate` 전용 |
 | `MEMORY_BACKUP_DATABASE_URL[_FILE]` | `recovery backup` 전용(읽기 전용 역할) |
 | `MEMORY_ALLOWED_HOSTS`, `MEMORY_ALLOWED_ORIGINS` | Host/Origin 허용 목록. 목록에 없는 Host는 loopback(상태 확인용)만 |
@@ -128,6 +128,8 @@ $A revoke-principal --principal "$PRINCIPAL_ID"                        # 즉시 
 | secrets를 읽지 못함 | 파일 모드/소유자. 컨테이너는 uid 10001로 실행 |
 
 ## 9. 검증 범위
+
+GitHub의 [Phase 0 verification](https://github.com/YB-Park/LLM-Agent-Memory/actions/workflows/phase0-verification.yml)은 `main` 및 대상 PR에서 PostgreSQL·GnuPG 2 통합 시험과 Compose/TLS 8개 시나리오를 실행한다. GitHub 호스팅 러너에서 그 실행을 위한 합성 데이터, 임시 자격증명과 개발용 CA를 생성한다. Compose 시나리오는 컨테이너를 중지하고 재시작하기 때문에 별도의 테스트 스택에서 실행한다.
 
 다음 표는 Namespace 제거 전 P0-5의 과거 실행 기록이다. 개정 버전에 대한 결과는 [구현 기록](../implementation/phase0-progress.md#10-단일-기억-공간-전환)을 참조한다.
 
