@@ -57,7 +57,7 @@ docker compose ps                         # migrate는 Exited(0), api/worker/pro
 | 변수 | 의미 |
 | --- | --- |
 | `MEMORY_DATABASE_URL[_FILE]` | 런타임 DB 연결(`memory_app`) |
-| `MEMORY_HMAC_KEY[_FILE]` | credential 다이제스트 HMAC 키(32자 이상) |
+| `MEMORY_HMAC_KEY[_FILE]` | 접수 키와 요청 다이제스트용 HMAC 키(32자 이상) |
 | `MEMORY_MIGRATION_DATABASE_URL[_FILE]`, `MEMORY_RUNTIME_ROLE`, `MEMORY_BACKUP_ROLE` | `migrate` 전용 |
 | `MEMORY_BACKUP_DATABASE_URL[_FILE]` | `recovery backup` 전용(읽기 전용 역할) |
 | `MEMORY_ALLOWED_HOSTS`, `MEMORY_ALLOWED_ORIGINS` | Host/Origin 허용 목록. 목록에 없는 Host는 loopback(상태 확인용)만 |
@@ -79,9 +79,11 @@ docker compose ps                         # migrate는 Exited(0), api/worker/pro
 
 Caddy는 `./certs/server.crt`·`server.key`를 읽는다(`auto_https off`, TLS 1.2+). 선택지:
 
-1. **개발·시험**: `./scripts/dev-certs.sh` — 30일짜리 임시 CA와 localhost 인증서. 클라이언트가 CA를 신뢰해야 한다. **시험 전용.**
+1. **개발·시험**: 표준 Linux Docker에서 깨끗한 테스트 디렉터리의 `./scripts/dev-certs.sh`를 root로 실행하면 30일짜리 임시 CA와 localhost 인증서가 생성된다. 클라이언트는 테스트 CA를 신뢰하도록 설정한다. **시험 전용.**
 2. **자체 인증서/사설 CA**: 두 파일을 배치하고 클라이언트에 CA를 설치.
 3. **ACME(Let's Encrypt)**: `deploy/Caddyfile`의 `auto_https off`·`tls` 지시문을 도메인 블록과 자동 HTTPS로 바꾸고 80/443을 게시한다. **구성하지도 시험하지도 않았다.**
+
+Caddy는 `NET_BIND_SERVICE` 외의 capability를 제거한 상태로 실행한다. bind mount한 인증서 디렉터리와 키는 컨테이너의 Caddy 사용자가 읽을 수 있어야 한다. 비root 호스트 사용자가 만든 접근 제한 디렉터리와 키를 그대로 마운트하면 Caddy 시작이 실패할 수 있다. 서버 키의 읽기 권한은 Caddy와 운영자로 제한한다.
 
 평문 HTTP 8080은 `edge`/`backend` 내부 네트워크에만 있다. 시험에서 호스트 8443에 평문 HTTP를 보내면 400이었고 8080/5432는 호스트에 게시되지 않았다.
 
@@ -128,6 +130,8 @@ $A revoke-principal --principal "$PRINCIPAL_ID"                        # 즉시 
 | secrets를 읽지 못함 | 파일 모드/소유자. 컨테이너는 uid 10001로 실행 |
 
 ## 9. 검증 범위
+
+GitHub의 [Phase 0 verification](https://github.com/YB-Park/LLM-Agent-Memory/actions/workflows/phase0-verification.yml)은 `main` 및 대상 PR에서 PostgreSQL·GnuPG 2 통합 시험과 Compose/TLS 8개 시나리오를 실행한다. GitHub 호스팅 러너에서 그 실행을 위한 합성 데이터, 임시 자격증명과 개발용 CA를 생성한다. Compose 시나리오는 컨테이너를 중지하고 재시작하기 때문에 별도의 테스트 스택에서 실행한다.
 
 다음 표는 Namespace 제거 전 P0-5의 과거 실행 기록이다. 개정 버전에 대한 결과는 [구현 기록](../implementation/phase0-progress.md#10-단일-기억-공간-전환)을 참조한다.
 
