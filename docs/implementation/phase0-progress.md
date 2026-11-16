@@ -1,6 +1,6 @@
 # Phase 0 구현 기록 — P0-0 환경 / P0-1 접수 / P0-2 Worker·검색 / P0-3 삭제·철회 / P0-4 Generation / P0-5 MCP·운영
 
-> 구현 진행 중 기록이다. 설계 기준선([Phase 0 Detailed Design v0.1](../design/phase0-detailed-design-v0.1.md))을 바꾸지 않고, 구현에서 선택한 값과 **실제로 관측한 결과**만 적는다. 추적: [Issue #6](https://github.com/YB-Park/LLM-Agent-Memory/issues/6)
+> §2–§9는 Namespace를 사용하던 P0-0~P0-5의 이전 구현과 당시 시험 기록이다. 현재 코드를 실행하려면 §1을, 단일 기억 공간 변경 및 현재 검증 결과는 §10을 참조한다. [Phase 0 Detailed Design](../design/phase0-detailed-design-v0.1.md)
 
 ## 1. 실행 방법
 
@@ -11,13 +11,12 @@
 python3 -m memory_server.worker --once  # Worker 1회 실행 (큐가 빌 때까지)
 ```
 
-수동 실행(환경 변수 `MEMORY_DATABASE_URL`, `MEMORY_HMAC_KEY` 필요, `PYTHONPATH=src`):
+수동 실행에는 `PYTHONPATH=src`, `MEMORY_DATABASE_URL`, `MEMORY_HMAC_KEY`, `MEMORY_ALLOWED_HOSTS`가 필요하다. 발급 결과의 ID를 `PRINCIPAL_ID`로 설정한다.
 
 ```bash
 python3 -m memory_server.migrate
-python3 -m memory_server.admin create-namespace --name personal
 python3 -m memory_server.admin create-principal --name laptop     # 토큰은 한 번만 출력
-python3 -m memory_server.admin grant --principal <id> --namespace <id> --write
+python3 -m memory_server.admin set-permissions --principal "$PRINCIPAL_ID" --write
 python3 -m memory_server.app --port 8080        # ASGI(REST+MCP). P0-5 이전의 memory_server.rest는 삭제됨
 ```
 
@@ -305,3 +304,25 @@ Ubuntu 24.04 컨테이너 / Python 3.12.3 / PostgreSQL 16.15 / psycopg2 2.9.9 / 
 - 인증 실패 제한은 프록시가 전달한 X-Forwarded-For(신뢰 IP에서만)에 의존. 의존성 해시 고정·이미지 스캔 없음. 요청 예산은 프로세스 메모리(재시작 시 초기화, 다중 인스턴스 비공유).
 - 호스트 전체 재부팅, 디스크 풀, 긴 시간의 PostgreSQL 장애는 시험하지 않음.
 - Issue #6의 P0-5 체크리스트 중 "Copilot 실사용", "실제 호스트 TLS", "20.04 호스트"는 이 결과와 일치하지 않는다(미완). 원격 이슈는 수정하지 않았다.
+
+
+## 10. 단일 기억 공간 전환
+
+출발점은 외부 GitHub `main`의 `08484ca257628c9c36fc7aa0252adf3d19f1b38e`다. 코드와 데이터 확인에는 해당 저장소 및 합성 fixture만 사용했다.
+
+| 영역 | 현재 동작 |
+| --- | --- |
+| 저장 및 인증 | Migration 0003이 Namespace와 Grant를 제거한다. 활성 포인터·게이트·리비전은 `system_control`에 있다. Principal은 명시적 전역 읽기·쓰기·관리와 기기별 credential을 가진다 |
+| REST 및 MCP | REST `/v2/*`. MCP 네 도구는 `/mcp`에 유지. 이전 `namespace_id` 인자는 오류. 접수 키는 Principal 단위 |
+| Worker 및 Generation | 원본·파생 결과·Provenance·lease/attempt 유지. 활성 세대 하나, 후보 비교·수동 전환·조건부 롤백, Rebuild 동안 서버 전체 신규 접수 정지 |
+| 삭제 및 복구 | 모든 세대에서 삭제된 원본의 결과 무효화. 권한 축소와 철회는 해당 Principal의 미종료 Job fence. 격리·최신 정책 재적용·공개 전 검증 |
+| 레거시 데이터 | 단일 Namespace에서 ID, 출처, 기존 receipt HMAC, Grant, 감사·ledger 이력 보존. 다중 Namespace와 미완료 Rebuild는 자동 이전 거부 |
+
+[배포와 이전 조건](../operations/deployment.md#10-기존-db-이전) · [정책 이력 및 복구](../operations/backup-recovery.md) · [Copilot 연결](../operations/vscode-copilot.md)
+
+### 이번 개정의 검증 결과
+
+- Debian 13, Python 3.12.14, 실제 PostgreSQL 16.11에서 `python -m pytest -q -rs --tb=short` 실행. **198개 통과, 8개 건너뜀, 실패 0개**. 합성 fixture로만 실행했다.
+- 공식 MCP SDK의 HTTP 호출과 REST 계약, 동시 중복·Worker lease/attempt, 엔진 비교·수동 전환·조건부 롤백, 삭제·기기 철회, PostgreSQL 권한 분리를 확인했다.
+- 새 스키마 및 실제 0001/0002 기반 데이터 이전, 다중 Namespace와 충돌 키·세대 상태 거부, format 1/2 암호화 아카이브 복원, 과거/현재 ledger 정책과 신규 복원별 재적용을 확인했다. 이 환경에서 Unix 소켓이 제한되어 복구 시험은 에이전트가 필요 없는 GnuPG 1.4.23으로 실제 AES-256 암호화·복호화를 수행했다.
+- Docker Compose/TLS 전체 스택 8개 시험은 Docker가 없는 환경이라 건너뛰었다. 기본 GnuPG 2 에이전트 경로, 실제 VS Code Copilot·외부 호스트, Ubuntu 20.04 환경은 이번 개정에서 미검증이다.

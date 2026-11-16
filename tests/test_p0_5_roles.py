@@ -84,33 +84,33 @@ def test_backup_role_is_read_only(role_db):
 def test_full_service_flow_runs_under_the_runtime_role(role_db):
     dsn = role_db["app"]
     config = Config(database_url=dsn, hmac_key=HMAC_KEY.encode())
-    ns = admin.create_namespace(dsn, "roles-ns")
+    active = admin.generations.generation_status(config)["generation_id"]
     dev = admin.create_principal(dsn, "roles-dev")
     other = admin.create_principal(dsn, "roles-other")
-    admin.grant(dsn, dev["principal_id"], ns["namespace_id"], write=True)
-    admin.grant(dsn, other["principal_id"], ns["namespace_id"], write=True)
+    admin.set_permissions(dsn, dev["principal_id"], write=True)
+    admin.set_permissions(dsn, other["principal_id"], write=True)
     svc = MemoryService(config)
-    receipt, _ = svc.submit(dev["token"], {"namespace_id": ns["namespace_id"], "content": {
+    receipt, _ = svc.submit(dev["token"], {"content": {
         "media_type": "text/plain", "text": "runtime role marker rolemarker"},
         "submission": {"intent": "explicit_memory", "actor_reported": "user"}}, "k1")
     Worker(config, "w").run_until_idle()
-    found = svc.search(dev["token"], {"namespace_id": ns["namespace_id"], "query": "rolemarker"})
+    found = svc.search(dev["token"], {"query": "rolemarker"})
     assert len(found["results"]) == 1
     # delete, revoke and generation work all run without schema or superuser rights
     operations.delete_experience(config, receipt["experience_id"])
-    assert svc.search(dev["token"], {"namespace_id": ns["namespace_id"], "query": "rolemarker"})["results"] == []
+    assert svc.search(dev["token"], {"query": "rolemarker"})["results"] == []
     operations.revoke_principal(config, other["principal_id"])
-    svc.submit(dev["token"], {"namespace_id": ns["namespace_id"], "content": {
+    svc.submit(dev["token"], {"content": {
         "media_type": "text/plain", "text": "second memory rolemarker2"}}, "k2")
     Worker(config, "w").run_until_idle()
-    admin.grant(dsn, dev["principal_id"], ns["namespace_id"], manage=True)
+    admin.set_permissions(dsn, dev["principal_id"], manage=True)
     gens = admin.generations
-    g2 = gens.start_generation(config, dev["principal_id"], ns["namespace_id"], str(uuid.uuid4()),
-                               ns["generation_id"], "2", "reference-keywords/v1")["generation_id"]
+    g2 = gens.start_generation(config, dev["principal_id"], str(uuid.uuid4()),
+                               active, "2", "reference-keywords/v1")["generation_id"]
     Worker(config, "w").run_until_idle()
     report = gens.compare_generation(config, dev["principal_id"], g2, ["rolemarker2"])
     assert report["status"] == "ready"
-    out = gens.activate_generation(config, dev["principal_id"], g2, ns["generation_id"], report["receipt_id"])
+    out = gens.activate_generation(config, dev["principal_id"], g2, active, report["receipt_id"])
     assert out["active_generation_id"] == g2
 
 

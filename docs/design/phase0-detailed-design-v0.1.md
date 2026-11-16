@@ -1,15 +1,15 @@
 # Phase 0 Detailed Design v0.1 — 기반 시스템과 Reference Memory Engine
 
-> **Phase 0 구현 기준선 v0.1 · 채택됨 / 변경 가능 · 2026-11-13 (KST)**  
-> 구현을 시작하기 위한 현재 합의 기준안이다. **코드·마이그레이션·장애·호환성 검증 결과는 아니다.** 구현 중 사실과 다른 가정이 확인되면 이유와 시험 결과를 남기고 문서를 수정한다. 장기적인 전체 아키텍처·기억 알고리즘을 확정하는 ADR은 아니다.  
+> **Phase 0 단일 기억 공간 개정 · 2026-11-16 (KST)**
+> 이 문서는 현재 전송·저장·운영 계약을 설명한다. 환경별 실행 결과는 [구현 기록](../implementation/phase0-progress.md#10-단일-기억-공간-전환)에 있다.
 > 상위 문서: [Architecture v0.1](../architecture/v0.1.md) · [MVP Contracts v0.1](mvp-contracts-v0.1.md)  
 > 설계 선택의 근거: [Review Issue #4](https://github.com/YB-Park/LLM-Agent-Memory/issues/4) · 구현 추적: [Issue #6](https://github.com/YB-Park/LLM-Agent-Memory/issues/6)
 
 **Reference Engine 구현 기준선:** Phase 0는 명시적 기억의 저장·세션 간 회상이 가능한 최소 Reference Engine을 포함한다. 최종 정합 과정에서 **실제 `evidence_refs` 연결은 Phase 0 범위 밖으로 보류**하고 수동 정정을 명시했다. 기존 잠금·lease·Generation 전환 절차는 유지한다. 구현·실사용 검증 완료를 뜻하지 않는다.
 
-## 1. 검토 기준과 결론
+## 1. 초기 설계의 검토 기록
 
-작업 시작 시 GitHub API로 `main` HEAD **`ea542f30dd5b5fbaa7e0df6d40549c8ae4f7df72`**를 확인하고 다음 파일 전체를 그 SHA에 고정해 읽었다. 과거 리뷰의 `7108915`, `691295f`, `8bc000d`를 현재 문서로 간주하지 않았다.
+초기 설계 작업에서 GitHub API로 `main` HEAD **`ea542f30dd5b5fbaa7e0df6d40549c8ae4f7df72`**를 확인하고 다음 파일 전체를 그 SHA에 고정해 읽었다. 과거 리뷰의 `7108915`, `691295f`, `8bc000d`를 현재 문서로 간주하지 않았다.
 
 | 확인 자료 | 확인한 상태 / 의미 |
 | --- | --- |
@@ -28,7 +28,7 @@
 
 | 등급 | 내용 |
 | --- | --- |
-| **R — 확인된 요구/원칙** | Experience와 Memory 분리, MCP 외부화, 출처·처리 버전, 보존된 원본의 재처리·비교, 범위 격리, 삭제 후 재노출 차단, 단순한 개인 시스템, 명시적 저장·세션 간 회상을 제공하고 Phase 1에도 보존할 Reference Engine, 이번 작업은 설계만 |
+| **R — 확인된 요구/원칙** | Experience와 Memory 분리, MCP 외부화, 출처·처리 버전, 보존된 원본의 재처리·비교, 인스턴스별 신뢰 경계, 삭제 후 재노출 차단, 단순한 개인 시스템, 명시적 저장·세션 간 회상을 제공하는 Reference Engine |
 | **P — Phase 0 구현 기준안(변경 가능)** | 작은 텍스트 PostgreSQL 저장, 작은 내부 엔진 함수, SQL Job Queue, 단일 공통 잠금, 명시적 입력 정지, 기존 4개 MCP 도구, 제출 메타데이터·다중 키워드 검색, 관리자 CLI, 실제 `evidence_refs` 연결 보류 |
 | **A — 미검증 가정** | 작은 데이터와 짧은 중단으로 충분, DB 단순 검색의 실험 비용 허용, 선택할 MCP SDK와 Copilot의 인증 설정 호환, 지정 호스트에서 컨테이너 실행 가능 |
 | **O — 구현/배포 전 결정 필요** | 원본 DB 저장 대안 채택, 입력 정지 허용 시간, 언어/SDK/런타임 버전, 인증 연결 프로필, 실제 호스트, 백업 보존·복구 목표 |
@@ -40,9 +40,9 @@ P는 **이번 Phase 0 구현을 시작하기 위해 채택한 기준안**이며 
 명시적 기억 또는 일반 텍스트 제출 → Experience와 Job 커밋 → Worker → Reference Engine → Memory Artifact와 출처 → MCP/REST 회상 → 원본 확인 → 같은 입력의 두 버전 비교·수동 전환·조건부 롤백을 검증한다. 기반 시스템 정합성과 좁은 범위의 회상 실용성을 별도로 평가한다.
 
 - 원본 입력: `text/plain`, UTF-8, NUL 제외, 본문 1~65,536 bytes. JSON 전체 96 KiB 이하, 출처 메타데이터 4 KiB 이하. 크기는 **초기 보호 한도 제안**이며 사용자 사용량을 측정한 결과가 아니다.
-- 한 호출은 한 namespace만 대상으로 한다. 개인/업무 등 여러 namespace는 독립 권한으로 허용하지만 자동 결합·전체 범위 검색은 제공하지 않는다.
-- 경험 본문·namespace는 생성 후 불변. 수정은 새 Experience로 제출한다. `source_version=1`은 이 입력의 버전이며 외부 문서의 최신 버전을 뜻하지 않는다. 기존 경험 대체·수정 API는 제외한다.
-- 테스트 데이터 기준 retained 원본 최대 1,000개/namespace, 세대 최대 3개로 시작한다. 제한 초과는 명시적으로 거절하며 자동 삭제하지 않는다. tombstone/receipt는 이 원본 수와 별도로 보존한다. 실제 용량 계획이나 성능 SLA가 아니다.
+- 한 서버는 하나의 기억 집합을 관리한다. 읽기 권한은 보존된 전체 집합을 대상으로 한다. 서로 다른 신뢰·보안 경계는 인스턴스를 분리한다. 프로젝트·주제·사건별 의미 조직은 Engine의 책임이다.
+- 경험 본문은 생성 후 불변. 수정은 새 Experience로 제출한다. `source_version=1`은 이 입력의 버전이며 외부 문서의 최신 버전을 뜻하지 않는다. 기존 경험 대체·수정 API는 제외한다.
+- 테스트 데이터 기준 retained 원본 최대 서버 전체 1,000개, 세대 최대 8개로 시작한다. 제한 초과는 명시적으로 거절하며 자동 삭제하지 않는다. tombstone/receipt는 이 원본 수와 별도로 보존한다. 실제 용량 계획이나 성능 SLA가 아니다.
 - 기본 엔진 `reference/1`은 Explicit Memory와 Source Projection을 처리한다. 비교 버전 `reference/2`는 같은 Explicit Memory를 보존하고 일반 Experience만 문단별로 투영한다. 종전 `projection/1`, `projection/2`의 전체/문단 비교 의도를 계승하며, 아직 구현되지 않은 엔진을 네 개 만들 필요는 없다. 공백만 있는 입력은 거절한다.
 - 두 버전은 같은 입력과 검색 프로필로 출력 개수·출처·검색 차이를 비교한다. Reference Engine은 Phase 1의 재실행 가능한 비교 기준으로 보존한다. **제한된 저장·회상 유용성은 시험하지만, 자동 기억 추출·연상·통합·망각 품질이나 복잡한 연구 엔진 간 호환성을 입증하지 않는다.**
 
@@ -56,7 +56,7 @@ P는 **이번 Phase 0 구현을 시작하기 위해 채택한 기준안**이며 
 | 별도 `POST /memories`가 같은 서비스로 위임 | 편의 alias일 뿐이며 현재 MCP 도구 수와 유지할 계약만 늘어난다. 실제 UX 필요가 생기면 추가 가능 |
 | 별도 Memory API가 Artifact를 직접 저장 | 원본·Job·세대를 우회하거나 같은 원자성/삭제 규칙을 두 번 구현해야 한다. Phase 0에서 채택하지 않음 |
 
-`memory_submit` / `POST /v1/experiences`에 선택적 `submission` 객체를 추가하고, 원문을 바꾸지 않는 canonical 메타데이터로 `experiences.source_metadata.submission`에 저장한다. 서버가 같은 JSON에 `submission_profile=reference-input/v1`도 기록한다. 생략하면 일반 Experience다. 이것은 **입력의 제출 의도와 출처 기록**이지 모든 엔진에 강제할 Memory 종류가 아니다. 향후 다른 엔진은 이를 해석/무시한 방식을 명시할 수 있다. 동적 입력 프로필 registry는 만들지 않는다.
+`memory_submit` / `POST /v2/experiences`에 선택적 `submission` 객체를 추가하고, 원문을 바꾸지 않는 canonical 메타데이터로 `experiences.source_metadata.submission`에 저장한다. 서버가 같은 JSON에 `submission_profile=reference-input/v1`도 기록한다. 생략하면 일반 Experience다. 이것은 **입력의 제출 의도와 출처 기록**이지 모든 엔진에 강제할 Memory 종류가 아니다. 향후 다른 엔진은 이를 해석/무시한 방식을 명시할 수 있다. 동적 입력 프로필 registry는 만들지 않는다.
 
 | submission 필드 | 계약 |
 | --- | --- |
@@ -113,15 +113,15 @@ Explicit Memory는 문구를 제출한 **자기 Experience 하나만** primary p
 | --- | --- |
 | `submit(auth, input, idempotency_key)` | `AcceptedReceipt`; 원본·Job을 한 트랜잭션으로 확정 |
 | `get_job(auth, job_id)` / `get_experience(auth, id)` | 현재 권한에 따른 상태/원본; 이전 접수 응답의 검색 가능 여부를 재사용하지 않음 |
-| `search(auth, query, keywords?, namespace, limit, max_chars)` | `SearchResult`; 일반 호출은 활성 세대만, 검색 프로필은 세대 설정 |
+| `search(auth, query, keywords?, limit, max_chars)` | `SearchResult`; 일반 호출은 활성 세대만, 검색 프로필은 세대 설정 |
 | `claim(worker_id)` / `heartbeat(job_id, attempt)` | 만료 시각과 단조 증가 `attempt`; Worker 시계 대신 DB 시각 |
 | `build(source_batch, engine_spec)` | `ArtifactDraft[]`; primary snapshot 1개만, 결과 0..N을 허용하는 내부 계약 |
 | `finalize(job_id, attempt, drafts)` | 원자적 성공 또는 안전한 거절; engine이 돌려준 권한/ID를 신뢰하지 않음 |
 | 관리자 `delete`, `retry_job`, `start_rebuild`, `compare`, `activate`, `resume`, `abort` | 동일 서비스의 별도 관리 권한; 일반 MCP에 등록하지 않음 |
 
-`SourceSnapshot`은 ID/version/namespace/원문/수신 시점/출처 메타데이터를 포함한다. `EngineSpec`은 engine 이름·버전·코드 빌드 식별자·입출력 형식 버전·canonical config와 hash·index profile을 포함한다. Phase 0의 model/prompt 값은 `null`이다. 엔진 버전 문자열만 바꾸지 않고 같은 이름에 다른 구현을 덮어쓰는 것을 금지한다.
+`SourceSnapshot`은 ID/version/원문/출처 및 제출 메타데이터를 포함한다. 서버 수신 시각은 Experience와 provenance 조회에서 확인한다. `EngineSpec`은 engine 이름·버전·코드 빌드 식별자·입출력 형식 버전·canonical config와 hash·index profile을 포함한다. Phase 0의 model/prompt 값은 `null`이다. 엔진 버전 문자열만 바꾸지 않고 같은 이름에 다른 구현을 덮어쓰는 것을 금지한다.
 
-`ArtifactDraft`는 `local_key`, `payload_schema`, `payload`, `display_text`, `search_text`, `source_refs[]`를 받는 Phase 0 내부 envelope다. source ref는 자기 primary Experience의 ID/version과 선택적 `[start_byte,end_byte)`를 참조한다. 서비스가 namespace, generation, job, artifact ID를 부여하고 출처 집합·구간·출력 한도를 검사하며 primary provenance를 누락시키지 않는다. 중복 local_key나 없는 원본 참조는 영구 오류다. display/search_text는 초기 검색 어댑터의 편의 표현이며 모든 미래 기억의 필수 모델이 아니다. 다른 엔진이 Narrative/Observation/Opinion/Atomic 구조를 쓰면 payload/schema와 검색 어댑터를 바꿀 수 있다.
+`ArtifactDraft`는 `local_key`, `payload_schema`, `payload`, `display_text`, `search_text`, `source_refs[]`를 받는 Phase 0 내부 envelope다. source ref는 자기 primary Experience의 ID/version과 선택적 `[start_byte,end_byte)`를 참조한다. 서비스가 generation, job, artifact ID를 부여하고 출처 집합·구간·출력 한도를 검사하며 primary provenance를 누락시키지 않는다. 중복 local_key나 없는 원본 참조는 영구 오류다. display/search_text는 초기 검색 어댑터의 편의 표현이며 모든 미래 기억의 필수 모델이 아니다. 다른 엔진이 Narrative/Observation/Opinion/Atomic 구조를 쓰면 payload/schema와 검색 어댑터를 바꿀 수 있다.
 
 한 Job 출력은 최대 256 Artifact, 직렬화된 draft 총량 1 MiB로 제한한다. reference/2의 Source Projection에서 문단 수가 이를 넘으면 `OUTPUT_LIMIT`으로 실패시키고 조용히 일부만 저장하지 않는다. 빈 줄은 LF 또는 CRLF의 빈 행이며 원문은 정규화하지 않고 원래 UTF-8 바이트 구간을 유지한다. 문단별 local_key는 원래 순서의 0부터 시작하는 정수 문자열이다. Explicit Memory는 local_key=`0`의 단일 결과다. 이 제한도 실험용 설정이다.
 
@@ -143,36 +143,34 @@ Explicit Memory는 문구를 제출한 **자기 Experience 하나만** primary p
 
 Source는 외부 대화·문서의 식별 정보이고 Experience는 서버가 받은 불변 snapshot이다. Phase 0에는 Source master 테이블을 만들지 않고 Experience에 `source_kind`, `source_ref`, `source_revision`, `session_ref`, `occurred_at`, `harness`를 선택적으로 보관한다. 출처 문자열은 클라이언트 주장이지 인증된 소유권이 아니며 URL을 자동으로 가져오지 않는다. 같은 source_ref의 서로 다른 제출을 자동 병합하지 않는다.
 
-관계는 `namespace → generation → job → artifacts`, `experience → jobs`, `artifact ↔ experiences(provenance)`다. 하나의 Experience는 여러 세대의 Job에 참여한다. `job_id`가 Phase 0의 논리적 processing run ID이고 `attempt`는 실행 시도다. 별도 run 테이블은 만들지 않는다. Generation은 공통 엔진 설정의 결과 묶음이며 Job/원본 자체를 대체하지 않는다.
+관계는 `generation → job → artifacts`, `experience → jobs`, `artifact ↔ experiences(provenance)`다. 하나의 Experience는 여러 세대의 Job에 참여한다. `job_id`가 Phase 0의 논리적 processing run ID이고 `attempt`는 실행 시도다. 별도 run 테이블은 만들지 않는다. Generation은 공통 엔진 설정의 결과 묶음이며 Job/원본 자체를 대체하지 않는다.
 
 ### 4.1 최소 테이블 사전
 
-다음은 마이그레이션 코드가 아닌 **컬럼·키 설계 후보**다. ID는 UUID, 시각은 UTC `timestamptz`, epoch/counter는 `bigint`, 상태는 `text + CHECK`, 내용은 제한된 `text/jsonb`를 사용한다. 상태 확장이 잦은 초기에 DB enum 타입을 추가하지 않는다.
+다음은 현재 스키마의 주요 컬럼과 키다. ID는 UUID, 시각은 UTC `timestamptz`, epoch/counter는 `bigint`, 상태는 `text + CHECK`, 내용은 제한된 `text/jsonb`를 사용한다. 상태 확장이 잦은 초기에 DB enum 타입을 추가하지 않는다.
 
 | 테이블 | 최소 컬럼 / 키 | 이유 |
 | --- | --- | --- |
-| `system_control` | singleton `id=1`, `policy_revision` | 짧은 DB 작업의 공통 잠금; 삭제·철회·grant 변경 시 revision 증가 |
-| `principals` | `id`, `credential_digest UNIQUE`, `kind=device/admin`, `auth_epoch`, `revoked_at`, `created_at` | 기기별 자격증명과 철회; 원문 토큰 저장 금지 |
-| `namespace_grants` | PK `(principal_id,namespace_id)`, `can_read`, `can_write`, `can_manage` | 작고 명시적인 서버 측 인가, 계층/상속 없음 |
-| `namespaces` | `id`, `name UNIQUE`, `active_generation_id`, `write_gate=open/paused`, `maintenance_generation_id`, `ingest_revision` | 세대 포인터·유지보수 상태·새 접수 여부를 DB에서 관리 |
-| `experiences` | `id`, `namespace_id`, `source_version=1`, `raw_text`, `source_metadata jsonb`, `content_digest`, `state=retained/deleted`, `created_by`, `received_at`, `deleted_at` | 원본 보존/삭제만 표현; 엔진 진행 상태를 넣지 않음 |
-| `ingest_receipts` | PK `(principal_id,namespace_id,key_digest)`, `request_digest`, `experience_id`, `initial_job_id`, `accepted_at` | 접수 멱등성; 삭제 후에도 원문 없는 receipt/tombstone 유지 |
-| `generations` | `id`, `namespace_id`, `base_generation_id`, `engine_spec jsonb`, `spec_digest`, `index_profile`, `state`, `snapshot_ingest_revision`, `manifest_digest`, `result_revision`, `created_at`, `retired_ingest_revision`, `comparison_receipt jsonb` | 설정 불변, 기준 집합·전환·비교 근거; 결과 저장/무효화 시 result_revision 증가 |
-| `jobs` | `id`, `namespace_id`, `generation_id`, `experience_id`, `source_version`, `input_digest`, `requested_by`, `authority_epoch`, `state`, `attempt`, `retry_count`, `lease_owner`, `lease_until`, `not_before`, `error_code`, `output_count`, `created_at`, `completed_at`; UNIQUE `(generation_id,experience_id,source_version)` | 한 원본/세대 한 논리 실행, 작업 행들이 명시적 Rebuild manifest를 겸함 |
-| `artifacts` | `id`, `namespace_id`, `generation_id`, `job_id`, `local_key`, `payload_schema`, `payload jsonb`, `display_text`, `search_text`, `state=valid/invalidated`, `created_at`; UNIQUE `(job_id,local_key)` | 엔진 고유 내용과 공통 수명 분리; 원자적으로 저장된 결과만 존재 |
-| `artifact_sources` | PK `(artifact_id,experience_id,source_version)`, `namespace_id`, 선택적 `spans jsonb` | 다중 출처를 표현; 한 출처의 여러 구간은 spans 배열 |
+| `system_control` | singleton `id=1`, `policy_revision`, `ingest_revision`, `service_state`, `active_generation_id`, `maintenance_generation_id`, `write_gate` | 공통 잠금, 정책 및 수신 리비전, 복구 격리, 단일 활성 포인터와 서버 전체 접수 상태 |
+| `principals` | `id`, `credential_digest UNIQUE`, `kind=device/admin`, `can_read`, `can_write`, `can_manage`, `auth_epoch`, `revoked_at`, `created_at` | 기기별 자격증명과 철회; 원문 토큰 저장 금지 |
+| `experiences` | `id`, `source_version=1`, `raw_text`, `source_metadata jsonb`, `content_digest`, `state=retained/deleted`, `created_by`, `received_at`, `deleted_at` | 원본 보존/삭제만 표현; 엔진 진행 상태를 넣지 않음 |
+| `ingest_receipts` | PK `(principal_id,key_digest)`, `request_digest`, `request_version`, `experience_id`, `initial_job_id`, `accepted_at` | 접수 멱등성; 삭제 후에도 원문 없는 receipt/tombstone 유지 |
+| `generations` | `id`, `base_generation_id`, `engine_spec jsonb`, `spec_digest`, `index_profile`, `state`, `snapshot_ingest_revision`, `manifest_digest`, `result_revision`, `created_at`, `retired_ingest_revision`, `comparison_receipt jsonb` | 설정 불변, 기준 집합·전환·비교 근거; 결과 저장/무효화 시 result_revision 증가 |
+| `jobs` | `id`, `generation_id`, `experience_id`, `source_version`, `input_digest`, `requested_by`, `authority_epoch`, `state`, `attempt`, `retry_count`, `lease_owner`, `lease_until`, `not_before`, `error_code`, `output_count`, `created_at`, `completed_at`; UNIQUE `(generation_id,experience_id,source_version)` | 한 원본/세대 한 논리 실행, 작업 행들이 명시적 Rebuild manifest를 겸함 |
+| `artifacts` | `id`, `generation_id`, `job_id`, `local_key`, `payload_schema`, `payload jsonb`, `display_text`, `search_text`, `state=valid/invalidated`, `created_at`; UNIQUE `(job_id,local_key)` | 엔진 고유 내용과 공통 수명 분리; 원자적으로 저장된 결과만 존재 |
+| `artifact_sources` | PK `(artifact_id,experience_id,source_version)`, 선택적 `spans jsonb` | 다중 출처를 표현; 한 출처의 여러 구간은 spans 배열 |
 | `audit_events` | `id`, `event_type`, `actor_id`, `object_ids jsonb`, `safe_details jsonb`, `at` | 삭제·철회·재시도 권한 재부여·비교/전환 기록; 원문/질의/토큰 제외 |
 
-11개 작은 테이블은 11개 서비스가 아니다. 인증·멱등성·출처를 엔진 payload에 숨기지 않기 위한 최소 분할이다. 별도 Source/Run/Index/Queue/Outbox/Engine Registry 테이블은 만들지 않는다. Credential 발급/초기 namespace·빈 활성 세대 생성은 관리 명령으로 원자적으로 수행한다.
+Migration 러너가 새 DB의 빈 `reference/1` Generation과 활성 포인터를 같은 트랜잭션에 기록한다. 기존 DB의 원자적 전환은 [배포 가이드](../operations/deployment.md#10-기존-db-이전)를 따른다.
 
-grant는 `can_manage → can_write → can_read` 제약을 두고 인증된 관리 주체만 변경한다. Phase 0에서 Job 실행 권한은 해당 namespace의 현재 can_write 및 auth_epoch 일치로 검사한다. rebuild/수동 retry를 요청할 때는 추가로 can_manage를 요구한다. principal의 kind만으로 모든 namespace의 권한을 자동 부여하지 않는다.
+권한에는 `can_manage → can_write → can_read` 제약이 있다. 새 Principal의 기본값은 모두 false이고 DB 접근 권한을 가진 운영자가 `set-permissions`로 명시한다. `kind` 자체는 권한을 부여하지 않는다. Worker는 `can_write`, 철회 여부와 `auth_epoch`를 확인한다. Rebuild와 수동 재시도에는 별도로 `can_manage`가 필요하다.
 
 ### 4.2 제약조건과 인덱스
 
-- FK는 가능한 곳에 `(id,namespace_id)` 또는 `(id,namespace_id,generation_id)`의 UNIQUE 키를 두어 세대/Job/Artifact/출처가 다른 범위로 연결되는 것을 DB에서도 거절한다. `namespaces.active_generation_id`도 해당 namespace의 세대를 참조한다. 최초 생성 순서는 namespace(포인터 null) → 빈 servable 세대 → 포인터 설정이며 한 트랜잭션이다.
-- `jobs`는 `(experience_id,namespace_id,source_version)`를 참조한다. `artifact_sources` 역시 그 키를 참조하고 `artifacts`와 namespace가 같아야 한다. 비어 있는 출처, 잘못된 구간, 성공 결과 개수 등 행 간 조건은 finalize 서비스가 같은 트랜잭션에서 검증한다.
+- `system_control`의 활성·유지보수 포인터는 Generation ID를 참조한다. 부분 UNIQUE 인덱스가 `servable` 세대를 하나로 제한한다. 게이트가 열려 있으면 유지보수 포인터는 비어 있다.
+- Job과 provenance는 원본의 `(experience_id, source_version)`을 참조한다. Artifact는 Job의 `(job_id, generation_id)`를 참조한다. 출처·구간·결과 개수는 finalize 트랜잭션에서 검증한다.
 - retained Experience는 raw_text/content_digest가 존재하고, deleted는 원문·민감 메타데이터가 null이다. valid Artifact는 유효한 payload/search_text를 가지며 invalidated는 이를 비운다. `ON DELETE CASCADE`로 출처 흔적을 무심코 없애지 않는다.
-- `jobs(state,not_before)`와 running 행의 `lease_until`, `experiences(namespace_id,state,id)`, `jobs(generation_id,state)`, `artifacts(namespace_id,generation_id,state)`, `artifact_sources(experience_id,source_version)`에 B-tree 인덱스를 둔다. 검색용 GIN/pgvector는 Phase 0 필수가 아니다.
+- `jobs(state,not_before)`와 running 행의 `lease_until`, `experiences(state,id)`, `jobs(generation_id,state)`, `artifacts(generation_id,state)`, `artifact_sources(experience_id,source_version)`에 B-tree 인덱스를 둔다. 검색용 GIN/pgvector는 Phase 0 필수가 아니다.
 - index는 별도 외부 객체가 아니다. `search_text`와 Reference payload의 제목/힌트 검색 표현을 Artifact와 함께 저장한다. 기본 `index_profile=reference-keywords/v1`, 회귀 비교용 `literal-substring/v1` 중 하나를 Generation에 고정한다(§7.1). 요청마다 임의로 프로필을 바꾸지 않는다. 나중에 embedding 차원·모델·인덱스 수명은 새 프로필/엔진 전용 저장으로 확장한다.
 - 콘텐츠 무결성 hash와 멱등성 request hash를 구분한다. receipt의 요청/키 digest는 서버 비밀키 HMAC으로 계산하고 원문을 보관하지 않는다. 삭제 시 콘텐츠 digest는 제거할 수 있으며 Job 입력 digest도 제거하되 ID/version/tombstone은 남긴다. HMAC 키는 백업·복구 대상이며 Phase 0에서는 회전을 구현하지 않는다.
 
@@ -189,7 +187,7 @@ grant는 `can_manage → can_write → can_read` 제약을 두고 인증된 관�
 | Experience | 미존재 → retained → deleted | deleted 복구 금지; 유효 원본은 Job 실패와 독립 |
 | Job | queued → running → succeeded / queued(자동 재시도) / failed / cancelled | 만료 running은 새 attempt로 running 또는 재시도 한도 초과 failed; succeeded 재실행 금지 |
 | Artifact | 미존재 → valid → invalidated | staging 행을 검색하지 않음; 삭제 시 payload·검색 표현 제거; invalidated 되살리기 금지 |
-| Generation | building → servable → retired; building/비활성 servable → aborted | active는 enum이 아니라 namespace 포인터; retired 재활성은 §8의 조건 충족 시만 |
+| Generation | building → servable → retired; building/비활성 servable → aborted | active는 enum이 아니라 서버의 활성 포인터; retired 재활성은 §8의 조건 충족 시만 |
 | Write gate | open → paused → open | 프로세스 메모리가 아니라 DB 상태; 재시작으로 자동 해제하지 않음 |
 
 `servable`은 검색 가능한 형식이라는 뜻이다. 활성 세대의 신규 Job이 모두 끝났다는 뜻은 아니다. 후보 전환 가능 여부는 별도의 coverage 검사와 comparison receipt로 판단한다. 원본 유지·G1 검색 가능·G2 실패가 동시에 참일 수 있다.
@@ -202,7 +200,7 @@ Phase 0는 **READ COMMITTED + `system_control` 단일 행 잠금**을 사용한�
 
 | 작업 | 잠금 및 순서 |
 | --- | --- |
-| 접수, 결과 공개, 삭제, 철회/grant 변경, 관리 재시도, 세대/게이트 변경, 비교 receipt 저장 | `system_control FOR UPDATE` → 필요한 namespace/generation/experience/job 행 순서; 복수 행은 ID 정렬 |
+| 접수, 결과 공개, 삭제, 철회/권한 변경, 관리 재시도, 세대/게이트 변경, 비교 receipt 저장 | `system_control FOR UPDATE` → 필요한 generation/experience/job 행 순서; 복수 행은 ID 정렬 |
 | 일반 검색·원본/Job 조회·비교 결과 산출 | `system_control FOR SHARE` → 잠금 획득 후 별도 statement로 현재 인증/권한·세대·원본 검증 → 결과 materialize → 커밋 |
 | Worker claim / 입력 snapshot | `system_control FOR SHARE` → Job `FOR UPDATE SKIP LOCKED` → 현재 권한/원본 확인 → attempt 증가/lease 기록 → 커밋 |
 | heartbeat | Job의 현재 attempt/state/만료 조건만 조건부 UPDATE; 같은 트랜잭션에서 나중에 control 잠금을 얻지 않음 |
@@ -211,7 +209,7 @@ Phase 0는 **READ COMMITTED + `system_control` 단일 행 잠금**을 사용한�
 
 `SKIP LOCKED`는 큐 선점에만 쓰고 검색·manifest·coverage 검사에는 쓰지 않는다. claim은 선점 후보를 찾은 뒤 권한을 확인하며 불허 Job은 cancelled 처리한다. lease 기본 후보는 30초, heartbeat 10초, 자동 시도 최대 3회, backoff 1초·5초(+jitter)다. 실제 SDK timeout/부하 측정 후 조정한다. heartbeat와 finalize는 잠금 획득 뒤 **DB의 현재 시각**과 `lease_until`을 비교한다. 만료 후 아직 B가 선점하지 않았어도 A의 결과를 거절한다.
 
-finalize는 현재 attempt, running, 유효 lease, requested_by의 현재 grant/auth_epoch, 원본의 retained/version/digest, Generation의 허용 상태·고정 spec을 검사한다. 성공이면 outputs/provenance와 succeeded를 한 트랜잭션에 기록한다. 실패하면 출력은 버리고 safe error/cancel 상태만 남긴다. 오류 반영도 attempt 조건을 걸어 늦은 A가 B의 성공을 failed로 덮지 못하게 한다.
+finalize는 현재 attempt, running, 유효 lease, requested_by의 현재 쓰기 권한/auth_epoch, 원본의 retained/version/digest, Generation의 허용 상태·고정 spec을 검사한다. 성공이면 outputs/provenance와 succeeded를 한 트랜잭션에 기록한다. 실패하면 출력은 버리고 safe error/cancel 상태만 남긴다. 오류 반영도 attempt 조건을 걸어 늦은 A가 B의 성공을 failed로 덮지 못하게 한다.
 
 DB 잠금으로 **공개 권한을 판정하고 결과를 커밋하는 작업**을 직렬화한다. 네트워크 응답 완료 시각까지 직렬화하는 보장은 아니다. 삭제 전에 이미 materialize된 응답이 네트워크 지연으로 나중에 도착하거나 클라이언트에 복사된 내용까지 회수할 수 없다. 삭제 커밋 뒤 시작한 새 조회·출처 확인은 대상 정보를 반환하지 않는다. 과거 SQL snapshot을 요청 간 재사용하지 않는다.
 
@@ -271,8 +269,8 @@ sequenceDiagram
     S-->>C: 409 IDEMPOTENCY_CONFLICT
 ```
 
-- 키는 필수, 1~128 ASCII 문자. 범위는 **principal + namespace + key**다. 다른 기기나 다른 키로 같은 원문을 제출하면 별도 경험이다. 콘텐츠 hash 전역 dedup은 하지 않는다.
-- request digest는 API 버전, namespace, 정확한 원문, 허용된 출처와 submission 전체의 canonical JSON으로 계산한다. JSON 키 순서는 무시하지만 본문 공백/줄바꿈/Unicode는 보존한다. 서버 시각·request_id·Authorization은 제외한다. Job input digest에는 primary 본문·이 메타데이터를 포함한다.
+- 키는 필수, 1~128 ASCII 문자. 범위는 **principal + key**다. 다른 기기나 다른 키로 같은 원문을 제출하면 별도 경험이다. 콘텐츠 hash 전역 dedup은 하지 않는다.
+- request digest는 API 버전, 정확한 원문, 허용된 출처와 submission 전체의 canonical JSON으로 계산한다. JSON 키 순서는 무시하지만 본문 공백/줄바꿈/Unicode는 보존한다. 서버 시각·request_id·Authorization은 제외한다. Job input digest에는 primary 본문·이 메타데이터를 포함한다.
 - 권한 확인 → 기존 receipt 확인 → 신규 요청에만 write gate/용량 확인 순서다. pause 중에도 기존 접수의 재확인은 가능하다. receipt UNIQUE와 트랜잭션이 동시 중복을 막는다.
 - 최초 REST는 202, 동일 접수 재요청은 200 `replayed=true`다. receipt는 초기 접수 사실만 재현하며 현재 상태는 별도 Job 조회다. 원본이 삭제됐다면 권한 있는 호출에 410 `EXPERIENCE_DELETED`, 새 Job은 만들지 않는다.
 - commit 결과가 불명확한 네트워크 오류에는 실패로 확정하거나 새 키를 권하지 않는다. 같은 키로 재시도하도록 안내한다. receipt/tombstone은 Phase 0 동안 만료시키지 않는다. 향후 보존 기간을 줄이면 중복 재접수 허용 시점을 계약 변경으로 다룬다.
@@ -321,21 +319,21 @@ sequenceDiagram
 
 ### 6.5 기기 철회와 원본 범위 변경
 
-기기 A 철회는 control exclusive lock 아래 `revoked_at`, `auth_epoch`를 갱신하고 A 권한으로 대기/실행 중인 Job을 cancelled/fenced로 만든다. 이미 생성된 공유 기억과 원본은 삭제하지 않는다. B가 해당 namespace를 읽을 권한이 있다면 계속 조회할 수 있다. A의 MCP 세션도 인증을 우회할 수 없으며 요청마다 확인한다.
+기기 A 철회는 control exclusive lock 아래 `revoked_at`, `auth_epoch`를 갱신하고 A 권한으로 대기/실행 중인 Job을 cancelled/fenced로 만든다. 이미 생성된 공유 기억과 원본은 삭제하지 않는다. B에게 읽기 권한이 있으면 계속 조회할 수 있다. A의 MCP 세션도 인증을 우회할 수 없으며 요청마다 확인한다.
 
-취소된 작업을 자동으로 더 강한 서비스 권한에 이관하지 않는다. 관리 권한이 있는 B가 원본/목적을 확인하고 `retry_job`으로 **B의 권한을 명시적으로 부여**할 수 있다. 작업의 requested_by/authority_epoch와 attempt를 갱신하고 audit에 이전/새 주체를 남긴다. 원본 삭제나 retired/aborted 세대의 Job은 재개하지 않는다. succeeded 결과를 변경할 때는 새 세대가 필요하다. grant 축소도 auth_epoch 증가와 동일한 차단 규칙을 사용한다.
+취소된 작업을 자동으로 더 강한 서비스 권한에 이관하지 않는다. 관리 권한이 있는 B가 원본/목적을 확인하고 `retry_job`으로 **B의 권한을 명시적으로 부여**할 수 있다. 작업의 requested_by/authority_epoch와 attempt를 갱신하고 audit에 이전/새 주체를 남긴다. 원본 삭제나 retired/aborted 세대의 Job은 재개하지 않는다. succeeded 결과를 변경할 때는 새 세대가 필요하다. Principal 권한 축소도 auth_epoch 증가와 동일한 차단 규칙을 사용한다.
 
-원본 namespace 이동/공개 범위 변경 API는 Phase 0에서 제공하지 않는다. 필요하면 원본 삭제와 새 namespace에 대한 명시적 신규 제출로 처리하며 원자적 이동을 약속하지 않는다. 추후 범위 변경을 추가할 때 원본 정책 revision과 영향 결과의 재평가 계약을 확장한다. 불변 namespace는 영구적인 알고리즘 제약이 아니다.
+모든 읽기 권한은 같은 집합에 적용된다. 별도의 신뢰 경계는 독립 인스턴스로 운영한다.
 
 ## 7. Read 계약
 
-1. 인증 주체를 서버에서 해석한다. 요청 namespace의 grant를 잠금 안에서 다시 확인한다. 타 namespace 또는 존재하지 않는 객체는 동일한 404 형태를 사용한다.
-2. 일반 검색은 `active_generation_id`를 한 번 읽고 그 세대에 한정한다. valid Artifact, 같은 namespace, 모든 provenance 원본 retained를 **후보 생성 쿼리부터** 조건으로 사용한다. 결과 조립 직전에도 같은 잠금 안에서 유효성을 확인한다.
+1. 인증 주체를 서버에서 해석한다. Principal의 읽기 권한을 잠금 안에서 확인한다. 권한이 없거나 객체가 존재하지 않으면 동일한 404를 반환한다.
+2. 일반 검색은 `active_generation_id`를 한 번 읽고 그 세대에 한정한다. valid Artifact, 모든 provenance 원본 retained를 **후보 생성 쿼리부터** 조건으로 사용한다. 결과 조립 직전에도 같은 잠금 안에서 유효성을 확인한다.
 3. Reference 기본값은 §7.1의 `reference-keywords/v1`이다. 전체 query literal 검색인 `literal-substring/v1`도 별도 세대 설정으로 보존한다. 와일드카드/정규식/FTS 질의 문법을 사용자 입력으로 실행하지 않고 SQL 파라미터로 전달한다. 의미 관련도나 사실 확신 score를 꾸며내지 않는다.
 4. 결과는 `kind=derived_memory`, generation/engine/index profile, artifact ID, 출처 ID/version/구간/시점, 발췌, `truncated`를 포함한다. Reference의 representation/제출자 주장/근거 상태/제목/일치 이유는 `engine_data`에 넣는다. 상태 valid는 정책상 유효하다는 뜻이지 사실 검증 완료가 아니다.
 5. 원본 fallback 검색은 하지 않는다. 원본은 ID를 통한 `get_experience`로 확인한다. 엔진 실패 시 기존 결과는 유지하지만 새 원본이 기억 검색에 나타나는 척하지 않는다.
 
-검색 완료의 빈 배열은 **이 세대의 현재 검색 가능한 결과에서 일치가 없음**만 뜻한다. pending Job이 해당 질의와 관련 있는지는 알 수 없다. 응답의 `indexing.has_pending/has_failed`는 허용된 namespace의 전체 상태이며 `indexing.scope=namespace`로 표시한다. 검색 DB 오류는 503으로 반환하며 빈 결과로 바꾸지 않는다. Job 상태 조회는 succeeded 여부와 `currently_visible`, `visibility_reason`을 별도로 반환한다(예: inactive_generation, deleted_source, no_output). 상태는 조회 시점 관측이며 다음 호출까지 보장하지 않는다.
+검색 완료의 빈 배열은 **이 세대의 현재 검색 가능한 결과에서 일치가 없음**만 뜻한다. pending Job이 해당 질의와 관련 있는지는 알 수 없다. 응답의 `indexing.has_pending/has_failed`는 활성 Generation의 전체 처리 상태다. 검색 DB 오류는 503으로 반환하며 빈 결과로 바꾸지 않는다. Job 상태 조회는 succeeded 여부와 `currently_visible`, `visibility_reason`을 별도로 반환한다(예: inactive_generation, deleted_source, no_output). 상태는 조회 시점 관측이며 다음 호출까지 보장하지 않는다.
 
 문자 예산은 UTF-8 중간 바이트를 자르지 않는 Unicode scalar 기준으로 정의한다. Phase 0에는 모델별 tokenizer를 도입하지 않고 `max_chars`를 사용한다. 결과 수 기본 5/최대 20, max_chars 기본 4,000/최대 16,000, query 최대 256자로 시작한다. 클라이언트 토큰 예산과 같다고 주장하지 않는다. 한글 조사·형태 변화·동의어·코드 심볼 검색 한계를 질의 fixture에 기록한다.
 
@@ -368,7 +366,7 @@ FTS는 사전·언어·코드 토큰 정책을 추가로 검증해야 하고, pg
 
 ### 8.1 Phase 0 정책: 전체 준비 기간 입력 정지
 
-한 namespace에 유지보수 후보 하나만 허용한다. 활성 세대 검색은 계속 제공하되 **prepare 시작부터 compare/activate/resume까지** 신규 접수를 거절한다. 전환 직전만 정지시키면서 준비 중 입력을 누락시키는 설계를 하지 않는다. 서버에 비공개 대기 큐나 dual write를 만들지 않는다. 새 입력의 임시 보관과 같은 키 재전송은 클라이언트 책임이다. 이 가용성 비용이 허용되지 않으면 Phase 0 범위 결정부터 바꾼다.
+서버당 유지보수 후보 하나를 허용한다. 활성 세대 검색은 계속 제공하되 **prepare 시작부터 compare/activate/resume까지** 모든 기기의 신규 접수를 거절한다. 전환 직전만 정지시키면서 준비 중 입력을 누락시키는 설계를 하지 않는다. 서버에 비공개 대기 큐나 dual write를 만들지 않는다. 새 입력의 임시 보관과 같은 키 재전송은 클라이언트 책임이다. 이 가용성 비용이 허용되지 않으면 Phase 0 범위 결정부터 바꾼다.
 
 ```mermaid
 sequenceDiagram
@@ -420,28 +418,27 @@ sequenceDiagram
 
 Generation은 활성 상태일 때 신규 Job으로 성장하는 **엔진 배포 단위**이지 영구 동결 snapshot이 아니다. Rebuild manifest와 비교 revision이 당시의 snapshot을 식별한다. 삭제/권한 정책은 모든 과거 세대에도 현재 상태를 적용한다. Phase 0는 자동 세대 GC를 만들지 않으며 후보 반복으로 한도에 도달하면 관리 정리 정책을 정한 뒤 추가한다.
 
-## 9. 최소 REST / MCP 계약 후보
+## 9. 최소 REST / MCP 계약
 
 ### 9.1 사용자 경로
 
 | REST | MCP tool | 권한 / 응답 |
 | --- | --- | --- |
-| `POST /v1/experiences` | `memory_submit` | write; 일반/명시적 제출 모두 202 최초 접수 / 200 receipt 재사용 |
-| `GET /v1/jobs/{job_id}` | `memory_job_status` | 해당 namespace read; 200 상태와 현재 visibility |
-| `POST /v1/memories/search` | `memory_search` | read; 200 결과·세대·namespace 처리 상태 |
-| `GET /v1/experiences/{experience_id}` | `memory_get_source` | read; 200 원문·출처 / 권한 있으면 삭제 410 |
+| `POST /v2/experiences` | `memory_submit` | write; 일반/명시적 제출 모두 202 최초 접수 / 200 receipt 재사용 |
+| `GET /v2/jobs/{job_id}` | `memory_job_status` | read; 200 상태와 현재 visibility |
+| `POST /v2/memories/search` | `memory_search` | read; 200 결과·세대·활성 Generation 처리 상태 |
+| `GET /v2/experiences/{experience_id}` | `memory_get_source` | read; 200 원문·출처 / 권한 있으면 삭제 410 |
 
 REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit은 `idempotency_key` 인자를 받아 같은 서비스에 넘긴다. principal/engine/generation 지정은 일반 제출 입력에 허용하지 않는다. MCP JSON-RPC request ID와 업무 멱등성 키는 다르다. 장시간 engine 실행을 MCP 호출 안에서 기다리지 않고 자체 Job을 polling한다. MCP의 별도 task 확장 구현은 Phase 0 필수가 아니다.
 
 추가 입력은 submit의 선택적 `submission`, search의 선택적 `keywords`뿐이다. `memory_submit` 설명에 일반 원본 기록과 명시적 기억 보존의 차이, actor_reported의 의미, 실제 근거 연결 미지원을 적는다. 현재 활성 엔진이 제출 프로필을 지원하지 않으면 무시하고 접수하지 말고 400 `UNSUPPORTED_SUBMISSION_PROFILE`을 반환한다. 이는 범용 capability registry가 아니라 선택한 엔진의 작은 정적 지원 확인이다. 기존 자료의 새 엔진 Rebuild는 그 프로필 처리 정책을 spec에 명시한다.
 
-예시의 `ns-project`, `e1`, `j1`, `g1`은 UUID를 줄여 쓴 표기다. 실제 스키마에서는 UUID 형식을 검증한다. 입력 JSON은 추가 필드를 거절한다. 출력에는 앞으로 선택적 필드를 추가할 수 있다.
+REST v2는 기존 `/v1/*` 경로를 404로 종료한다. MCP의 URL과 도구 이름은 유지하며 스키마를 다시 불러와야 한다. 양쪽 모두 이전 `namespace_id` 입력을 `UNKNOWN_FIELD`로 거절한다. 예시의 `e1`, `j1`, `g1`은 UUID를 줄여 쓴 표기다. 실제 스키마에서는 UUID 형식을 검증한다. REST 입력 JSON은 추가 필드를 거절한다. 출력에는 앞으로 선택적 필드를 추가할 수 있다.
 
 일반 Experience 입력 예(선택적 submission을 생략하면 intent=experience, actor_reported=unknown):
 
 ```json
 {
-  "namespace_id": "ns-project",
   "content": {"media_type": "text/plain", "text": "회의 기록: 배포 DB로 PostgreSQL을 선택했다.\n\n다음 작업은 배포 절차 작성이다."},
   "source": {"kind": "conversation", "source_ref": "session-7/turn-4"}
 }
@@ -451,7 +448,6 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 
 ```json
 {
-  "namespace_id": "ns-project",
   "content": {"media_type": "text/plain", "text": "배포 DB는 PostgreSQL을 사용한다."},
   "source": {"kind": "conversation", "source_ref": "session-7/turn-5", "harness": "copilot"},
   "submission": {
@@ -463,7 +459,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 
 ```json
 {
-  "api_version": "v1",
+  "api_version": "v2",
   "status": "accepted",
   "experience_id": "e1",
   "source_version": 1,
@@ -475,7 +471,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 }
 ```
 
-원본 GET은 `experience_id`, `source_version`, `namespace_id`, `state`, `content`, 허용된 `source/submission`, 서버 `created_by/received_at`과 클라이언트가 제공한 선택적 `occurred_at/actor_reported`를 구분해 반환한다. 둘의 신뢰도를 혼동하지 않는다. 대용량 원본 페이지네이션은 범위 밖이다.
+원본 GET은 `experience_id`, `source_version`, `state`, `content`, 허용된 `source/submission`, 서버 `created_by/received_at`과 클라이언트가 제공한 선택적 `occurred_at/actor_reported`를 구분해 반환한다. 둘의 신뢰도를 혼동하지 않는다. 대용량 원본 페이지네이션은 범위 밖이다.
 
 ```json
 {
@@ -487,11 +483,11 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
 }
 ```
 
-`retryable`은 그 실패가 자동 재시도 대상인지 뜻한다. 관리자의 수동 재시도 허용 여부는 별도 권한/원본/세대 검사를 거친다. queued는 `next_attempt_at`, running은 관측된 상태만 전달하고 내부 Worker ID·비밀은 숨긴다. B는 namespace read 권한으로 공유 Job 진행을 볼 수 있지만 retry는 manage가 필요하다.
+`retryable`은 그 실패가 자동 재시도 대상인지 뜻한다. 관리자의 수동 재시도 허용 여부는 별도 권한/원본/세대 검사를 거친다. queued는 `next_attempt_at`, running은 관측된 상태만 전달하고 내부 Worker ID·비밀은 숨긴다. B는 읽기 권한으로 공유 Job 진행을 볼 수 있지만 retry는 manage가 필요하다.
 
 ```json
 {
-  "namespace_id": "ns-project", "query": "우리 프로젝트 배포 DB 뭐였지?",
+  "query": "우리 프로젝트 배포 DB 뭐였지?",
   "limit": 5, "max_chars": 4000
 }
 ```
@@ -501,7 +497,7 @@ REST는 `Authorization`과 `Idempotency-Key` 헤더를 사용한다. MCP submit�
   "generation_id": "g1", "engine": "reference/1", "status": "ok",
   "index_profile": "reference-keywords/v1",
   "effective_keywords": ["우리", "프로젝트", "배포", "db", "뭐였지"],
-  "indexing": {"scope": "namespace", "has_pending": false, "has_failed": false},
+  "indexing": {"has_pending": false, "has_failed": false},
   "results": [{
     "artifact_id": "m1", "kind": "derived_memory", "validity": "valid",
     "text": "배포 DB는 PostgreSQL을 사용한다.", "truncated": false,
@@ -530,7 +526,7 @@ MCP 성공은 같은 업무 객체를 `structuredContent`로 반환하고 호환
 {
   "error": {
     "code": "INGEST_PAUSED",
-    "message": "이 범위는 재처리 중입니다. 같은 키로 나중에 다시 제출하세요.",
+    "message": "서버가 재처리 중입니다. 같은 키로 나중에 다시 제출하세요.",
     "retryable": true, "retry_after_ms": 5000
   },
   "request_id": "req-2"
@@ -540,12 +536,12 @@ MCP 성공은 같은 업무 객체를 `structuredContent`로 반환하고 호환
 | 상황 | REST | MCP 업무 결과 |
 | --- | --- | --- |
 | 만료/철회/없는 인증 | 401 | 전송 계층 인증 실패; 도구 결과로 성공 포장하지 않음 |
-| 알 수 없거나 접근 불가한 namespace/객체 | 404 | `isError=true`, `NOT_FOUND` |
-| 유효 namespace이지만 관리 권한 없음 | 403 | 관리 tool 자체 미등록 |
+| 읽기·쓰기 권한 없음 또는 알 수 없는 객체 | 404 | `isError=true`, `NOT_FOUND` |
+| 관리 기능 호출 | 관리 REST 미등록 | 관리 tool 미등록 |
 | JSON/type/범위 검증, 큰 입력 | 400 / 413 | JSON-RPC 형식 오류는 protocol error, 업무 입력 오류는 `isError=true` |
 | 같은 키/다른 요청, 비교 stale, expected_active 불일치 | 409 | `isError=true`, 구체적인 safe code |
 | 권한 내 삭제된 Experience | 410 | `isError=true`, `EXPERIENCE_DELETED` |
-| 입력 정지·용량·DB/검색 일시 장애 | 503 + 가능한 Retry-After | `isError=true`, `retryable`와 재시도 안내 |
+| 입력 정지·큐 한도·DB/검색 일시 장애 | 503 + 가능한 Retry-After | `isError=true`, `retryable`와 재시도 안내 |
 | 정상 검색의 일치 없음 | 200 + 빈 results | `isError=false`; “지식이 없음”으로 단정 금지 |
 | Job이 failed인 상태 조회 | 200 + `state=failed` | 조회 자체는 `isError=false`, Job 오류는 객체 내부 |
 
@@ -553,19 +549,16 @@ MCP `tools/call` 접수 결과의 `status=accepted`는 REST의 202와 동일한 
 
 ### 9.3 관리 작업: 일반 MCP에는 노출하지 않는다
 
-먼저 관리자 CLI가 같은 Application Service를 호출하도록 구현하면 아래 관리 REST 전부를 만들 필요가 없다. **필수는 작업 의미이며 관리 전송 방식은 하나만 선택**한다. REST를 택하면 별도 admin credential과 외부 접근 제한을 적용한다. 일반 기기 토큰에는 관리 권한을 주지 않는다.
+관리 작업은 DB에 접속하는 `memory_server.admin` 및 `memory_server.recovery` CLI에서 실행한다.
 
-| 관리 REST 후보 | 최소 입력 / 결과 |
+| 관리 명령 | 계약 |
 | --- | --- |
-| `DELETE /v1/admin/experiences/{id}` | idempotent; hidden/redacted/backup 상태 |
-| `POST /v1/admin/principals/{id}/revoke` | idempotent; 철회 완료, 진행 Job 취소 수, 공유 데이터 유지 |
-| `POST /v1/admin/jobs/{id}/retry` | `expected_attempt`, 새 권한 주체는 인증값; 변경된 attempt/state |
-| `POST /v1/admin/generations` | `operation_id`, namespace, `expected_active`, 새 engine_spec; generation ID/paused/진행 상태 |
-| `GET /v1/admin/generations/{id}` | manifest·진행·실패·coverage·gate 상태; raw content 없음 |
-| `POST /v1/admin/generations/{id}/compare` | base ID, fixture ID와 제한된 queries(최대 20); comparison receipt/차이 요약 |
-| `POST /v1/admin/generations/{id}/activate` | expected_active, comparison receipt ID; 현재 active/paused. 조건부 롤백도 동일 계약 |
-| `POST /v1/admin/generations/{id}/abort` | expected_active; 후보 취소와 기존 활성 세대 입력 재개 |
-| `POST /v1/admin/namespaces/{id}/resume` | expected_active, maintenance generation ID; gate open |
+| `create-principal`, `set-permissions` | 별도 credential 발급 후 전역 권한을 명시적으로 설정 |
+| `rotate-credential`, `revoke-principal` | 기존 credential 철회와 미종료 Job fence. 교체 시 동일 권한의 새 Principal 발급 |
+| `delete-experience`, `retry-job` | 전체 세대에서 결과 무효화 또는 현재 관리 권한과 expected attempt로 Job 재큐잉 |
+| `generation-status [--generation ID]` | ID 생략 시 활성 세대의 상태·coverage 확인 |
+| `start-generation`, `compare-generation`, `activate-generation` | 후보 준비, 비교 receipt, 검증된 수동 전환 |
+| `prepare-rollback`, `abort-generation`, `resume-ingest` | 조건부 롤백 후보 설정, 유지보수 중단 또는 활성 세대 접수 재개 |
 
 compare receipt는 서버 발급 UUID이며 §8.2의 revision과 관측된 활성 포인터를 포함한다. retry/resume/abort의 재요청은 현재 상태가 요청한 종료 상태와 같은지 확인하고 200 또는 409를 반환한다. command 실행 결과를 audit에 남기며 의도와 다른 최신 상태에 무조건 적용하지 않는다.
 
@@ -610,7 +603,7 @@ compare receipt는 서버 발급 UUID이며 §8.2의 revision과 관측된 활�
 | 단계 | 구현할 최소 범위 | 완료 기준 / 다음 단계 조건 |
 | --- | --- | --- |
 | P0-0 결정·환경 spike | 원본 DB 저장/중단 정책 선택, 언어·SDK·PostgreSQL 버전, 인증 프로필, 호스트 목록 | 결정 기록과 실제 client↔서버 인증 연결 결과. 미결정 배포 항목은 합성 로컬 시험과 실데이터 원격 운영을 구분 |
-| P0-1 저장·접수 | schema, bootstrap, principal/grants, submit/receipt/job 조회 | 접수 원자성·응답 유실·동시 중복·범위 격리 시험 통과 |
+| P0-1 저장·접수 | schema, bootstrap, Principal 권한, submit/receipt/job 조회 | 접수 원자성·응답 유실·동시 중복·권한 확인 시험 통과 |
 | P0-2 Worker·검색 | reference/1의 두 동작, submission metadata, keyword profile, lease/fence/finalize, 검색/원본 조회 | 문구 보존·검색 fixture·신뢰 표시와 한 수직 경로, lease 경합·중단 복구·검색 실패 의미 확인 |
 | P0-3 정책 수명 | 삭제/철회/관리 retry, audit | 삭제/공개 두 순서·검사 직후 삭제·A 철회/B 유지·과거 세대 무효화 통과 |
 | P0-4 세대 실험 | reference/2, 입력 gate, manifest, compare, activate/abort/resume/rollback | Explicit 출력 보존·Projection 차이, 누락 없는 coverage, stale 비교 차단, crash 복구, 신규 접수 후 단순 롤백 거절 및 G3 rebuild 통과 |
@@ -625,13 +618,13 @@ MCP 연결 spike는 P0-0에서 하되 업무 tool 연결은 서비스 계약이 
 | ID | 주입/시나리오 | 반드시 관측할 결과 |
 | --- | --- | --- |
 | T1 | 원본 INSERT 후 Job INSERT 실패, commit 직후 응답 유실 | 전자는 원본/receipt/Job 모두 없음; 후자는 같은 키로 같은 IDs 회수 |
-| T2 | 동시 같은 키 같은 본문/다른 본문, 다른 namespace | 같은 요청 1 receipt·1 원본·1 Job; 다른 본문 409; 범위 간 합치지 않음 |
+| T2 | 동시 같은 키 같은 본문/다른 본문, 서로 다른 Principal | 같은 요청 1 receipt·1 원본·1 Job; 다른 본문 409; 다른 Principal의 접수는 독립적 |
 | T3 | Worker kill: claim 후, result INSERT 후 commit 전, commit 후 | lease 재처리 또는 이미 succeeded; 부분 결과 0, 공개 중복 0 |
 | T4 | A lease 만료 → B claim/완료 → A finalize/error/heartbeat | A의 모든 상태 변경 차단; B 결과만 유지. B 없이 만료된 A도 거절 |
 | T5 | Worker의 잠금 밖 확인 직후 삭제, 반대로 finalize lock 획득 후 삭제 | 삭제 먼저면 finalize 거절; 공개 먼저면 삭제가 기다린 뒤 모든 세대 payload 제거 |
 | T6 | 원본 삭제 후 원본/검색/후보/퇴역/롤백/멱등 재제출 | 재노출 0; retained 원본을 참조하는 다른 Artifact에는 영향 없음 |
 | T7 | A 토큰 철회와 finalize/검색 경합, B 토큰 유지 | A 새 접근 차단·A 비종료 Job fence; B 기존 결과 조회 성공. B 관리 retry 전에는 취소 작업 공개 없음 |
-| T8 | 허용 범위 없는 ID/namespace, 악성 source_ref/검색 문자열/원문 지시 | 존재 노출 없는 오류, SQL 주입 불가, 원문은 데이터로 반환; 이 시험만으로 클라이언트 prompt injection 방어 완성을 주장하지 않음 |
+| T8 | 권한 없는 기기의 ID 조회, 악성 source_ref/검색 문자열/원문 지시 | 존재 노출 없는 오류, SQL 주입 불가, 원문은 데이터로 반환; 이 시험만으로 클라이언트 prompt injection 방어 완성을 주장하지 않음 |
 | T9 | G2 준비 중 새 Experience, start 직전/직후 submit 경합 | start 이전 commit은 manifest 포함; 이후 신규 요청 503·원본/Job 없음; 같은 receipt 재확인은 가능 |
 | T10 | 같은 개수지만 다른 ID 집합, failed/cancelled/zero-output/누락 Job | 양방향 coverage로 차단; Reference retained 입력의 zero-output은 fixture 실패 |
 | T11 | compare 뒤 삭제/철회/결과 변경, 두 관리자 컷오버 경쟁 | stale receipt/expected_active는 409; 하나의 active pointer만 유지 |
@@ -641,24 +634,24 @@ MCP 연결 spike는 P0-0에서 하되 업무 tool 연결은 서비스 계약이 
 | T15 | 옛 DB 백업 복구 + 별도 최신 삭제/철회 목록 재적용 | 검증 전 비공개; 삭제 재노출 0, 철회 credential 차단; 최신 목록 없으면 공개 거절 |
 | T16 | Copilot 명시 저장→새 세션 검색→두 번째 기기/클라이언트 출처 확인 | 실제 tool 호출과 결과 기록, client/OS/SDK 버전 명시. 자동 호출 여부는 별도 관찰 |
 | T17 | 같은 원문·키에 intent/title/hint/actor만 변경, explicit 다문단 입력 | 변경은 409, 명시적 본문은 원래 byte 그대로 단일 Artifact, projection/explicit 표시 혼동 없음 |
-| T18 | agent/user/unknown 주장, locator-only 제출, 미지원 evidence_refs와 접근 금지 namespace | 사용자 사실 검증으로 승격 0, locator를 실제 연결로 표시하지 않음, 미지원 필드 거절 및 범위 격리 |
+| T18 | agent/user/unknown 주장, locator-only 제출, 미지원 evidence_refs와 권한 없는 제출 | 사용자 사실 검증으로 승격 0, locator를 실제 연결로 표시하지 않음, 미지원 필드 및 권한 없는 요청 거절 |
 | T19 | 잘못된 Explicit Experience 삭제 후 새 키로 수정본 제출, Rebuild/롤백 | 삭제된 이전 문구 재노출 0, 수정본 활성 세대 검색 가능, 자동 supersession 없음. 별도 일반 Experience는 유지 |
 | T20 | natural query/명시 keywords/제목·힌트 only/중복 term/Unicode·기호/동률/긴 query | §7.1의 결정적 순위와 안전한 오류, raw text 불변, 권한 밖 matched_terms/개수 누출 없음; literal 기준선도 별도 기록 |
 
-최소 fixture는 personal/work 두 namespace, 기기 A/B와 별도 관리자, 한국어·영어·혼용·코드 심볼·다문단 텍스트, 서로 같은 본문/다른 범위, 삭제된 출처를 포함한다. 일반 Memory 엔진이 아직 없어도 synthetic 다중 출처 Artifact의 한 출처 삭제가 전체 무효화를 일으키는 정책 테스트를 추가한다. 이것이 통합 알고리즘 구현은 아니다.
+최소 fixture는 단일 기억 집합, 기기 A/B와 읽기 전용·미인가 기기 및 관리자, 한국어·영어·혼용·코드 심볼·다문단 텍스트, 서로 다른 기기의 같은 키와 본문, 삭제된 출처를 포함한다. 일반 Memory 엔진이 아직 없어도 synthetic 다중 출처 Artifact의 한 출처 삭제가 전체 무효화를 일으키는 정책 테스트를 추가한다. 이것이 통합 알고리즘 구현은 아니다.
 
-정합성 합격 기준은 대상 시험의 **누락/권한 누출/중복 공개/삭제 후 재공개 0건**이다. 모든 Job에 성공·정책 취소·한도 초과 실패 중 설명 가능한 종료 상태가 있어야 한다. 정해진 timeout 안에 끝나지 않는 작업은 실패로 기록하고 방치하지 않는다. 지연/throughput/메모리 수치는 명시한 데이터량·환경에서 측정만 하며 현재 성능 합격선을 발명하지 않는다. 단일 잠금 병목이 확인되면 namespace별 잠금으로 나누는 후속 설계를 검토한다.
+정합성 합격 기준은 대상 시험의 **누락/권한 누출/중복 공개/삭제 후 재공개 0건**이다. 모든 Job에 성공·정책 취소·한도 초과 실패 중 설명 가능한 종료 상태가 있어야 한다. 정해진 timeout 안에 끝나지 않는 작업은 실패로 기록하고 방치하지 않는다. 지연/throughput/메모리 수치는 명시한 데이터량·환경에서 측정만 하며 현재 성능 합격선을 발명하지 않는다. 단일 잠금 병목이 확인되면 작업별 잠금 범위를 줄이는 후속 설계를 검토한다.
 
 Phase 0 완료 보고에는 빌드/설정/fixture ID, 시험 명령과 관측 결과, 실패·제한 사항, 정확한 OS/클라이언트 조합을 남긴다. §11.2로 명시적 기억의 좁은 실용성을 평가하되 “회상 fixture가 통과했다”를 “일반 장기기억 품질이 좋다”로 바꾸지 않는다. 자동 추출·consolidation/연상/망각은 별도 Phase 1 계획이다.
 
 ### 11.2 실제 Copilot Agent 저장·회상 시험
 
-다음은 **시험 계획과 합격 조건 제안**이며 실행 결과가 아니다. 같은 namespace의 합성 자료로 프로젝트 결정·개발 규칙·주의사항·선호의 Explicit Memory 8개, 일반 Experience 4개, 별도 접근 금지 namespace의 미끼 2개를 준비한다. 언어/코드·제목/힌트·locator 유무를 섞고 기대 Experience ID를 미리 지정한다. 단순 출력 시연만으로 합격 처리하지 않는다.
+다음은 **시험 계획과 합격 조건 제안**이며 실행 결과가 아니다. 같은 인스턴스의 합성 자료로 프로젝트 결정·개발 규칙·주의사항·선호의 Explicit Memory 8개, 일반 Experience 4개, 별도 격리 인스턴스의 미끼 2개를 준비한다. 언어/코드·제목/힌트·locator 유무를 섞고 기대 Experience ID를 미리 지정한다. 단순 출력 시연만으로 합격 처리하지 않는다.
 
 | 시나리오 | 실행과 관측 |
 | --- | --- |
 | C1 명시적 저장 | Copilot에 “다음 문구를 기억해: 배포 DB는 PostgreSQL을 사용한다” 요청. 실제 memory_submit 인자(intent=explicit_memory, actor_reported=agent)·receipt·job status 확인. 제출 문구와 Artifact 원문이 동일해야 함 |
-| C2 새 세션 회상 | 이전 대화를 제공하지 않는 새 세션에서 “우리 프로젝트 배포 DB 뭐였지?” 질문과 필요 시 명시적 memory_search 지시. 실제 호출과 유효 namespace/세대·근거를 기록. 이전 대화·파일에서 읽은 답을 메모리 회상 성공으로 세지 않음 |
+| C2 새 세션 회상 | 이전 대화를 제공하지 않는 새 세션에서 “우리 프로젝트 배포 DB 뭐였지?” 질문과 필요 시 명시적 memory_search 지시. 실제 호출과 활성 세대·근거를 기록. 이전 대화·파일에서 읽은 답을 메모리 회상 성공으로 세지 않음 |
 | C3 키워드 재시도 | 표현이 다른 질문을 먼저 query만으로 검색한 결과를 기록. 이어 keywords=[데이터베이스]로 재시도하여 사전 제공한 힌트와의 일치 확인. 첫 실패를 감추지 않고 자동 query 경로와 키워드 보조 경로를 별도 측정 |
 | C4 한영·코드 | PostgreSQL 대소문자, foo_bar, parseHTTPResponse, C++/std::vector(명시 keywords)를 시험. 힌트-only 결과는 본문 근거와 혼동하지 않는지 확인 |
 | C5 출처·주체·신뢰 | Explicit 결과의 primary Experience를 memory_get_source로 확인. agent 제출/사용자 주장/locator-only/일반 투영을 구별하고 “사용자 검증 사실”로 표현하지 않는지 답변을 관찰 |
@@ -668,7 +661,7 @@ Phase 0 완료 보고에는 빌드/설정/fixture ID, 시험 명령과 관측 �
 
 미리 동결한 질의 12개를 마련한다: 겹치는 키워드가 있는 자연어 4개, 제목/힌트와 명시 keywords를 쓰는 4개, 코드 식별자 2개, 겹침 없는 바꿔 말하기·부정/상충 사례 2개. **앞의 지원 사례 10개는 기대 ID가 top-3에 포함**되고 금지 범위 반환은 0이어야 한다. 동률은 fixture에서 피하거나 동등한 정답 집합을 명시한다. 마지막 2개는 miss/모순 결과와 한계를 정확히 기록하는 시험이며 사실 해결 능력을 요구하지 않는다. 검색 순위 목표는 제안된 fixture 합격선이지 이미 측정된 정확도나 일반 성능 보장이 아니다.
 
-REST로 같은 질의의 순위를 먼저 확인한 뒤 Copilot이 실제 호출했는지를 분리한다. `literal-substring/v1`과 keyword profile의 hit@3·오탐·반환 종류·지연을 별도 합성 namespace/세대에서 비교하고, 질의별 키워드 보조 여부를 남긴다. 모델이 어떤 키워드를 선택했는지와 서버 검색의 결정성을 혼동하지 않는다. client 버전·도구 설명·MCP 설정·입력 인자·fixture/spec hash를 기록하되 실제 토큰/개인 데이터는 보존하지 않는다.
+REST로 같은 질의의 순위를 먼저 확인한 뒤 Copilot이 실제 호출했는지를 분리한다. `literal-substring/v1`과 keyword profile의 hit@3·오탐·반환 종류·지연을 동일 원본의 합성 세대에서 비교하고, 질의별 키워드 보조 여부를 남긴다. 모델이 어떤 키워드를 선택했는지와 서버 검색의 결정성을 혼동하지 않는다. client 버전·도구 설명·MCP 설정·입력 인자·fixture/spec hash를 기록하되 실제 토큰/개인 데이터는 보존하지 않는다.
 
 ### 11.3 Reference 보존과 Phase 1의 개선 대상
 
@@ -681,7 +674,7 @@ Reference는 제출자의 문구/힌트 품질에 의존하고 중복·상충·�
 | 논점 | 이번 제안과 비용 | 보류한 대안 / 재검토 계기 |
 | --- | --- | --- |
 | 원본 저장 | 작은 텍스트는 DB, 원자적 접수와 복구 단순화; DB 크기 증가 | 파일/S3: 첨부파일·큰 원본이 필요할 때 |
-| 공개 동시성 | 단일 control row, 설명·검증 간단; 짧은 쓰기 직렬화 비용 | namespace/원본별 락·세밀한 CAS: 측정된 병목 이후 |
+| 공개 동시성 | 단일 control row, 설명·검증 간단; 짧은 쓰기 직렬화 비용 | 원본별 락·세밀한 CAS: 측정된 병목 이후 |
 | Generation | DB 결과와 검색 표현의 세대 묶음, 수동 비교/전환만 | 전용 Index service·schema-per-generation: 엔진 요구가 있을 때 |
 | 동시 입력 | prepare부터 명시적 503; 중단 동안 클라이언트 재전송 필요 | watermark/dual write/change log: 중단을 허용할 수 없을 때 |
 | 롤백 | 새 입력 없을 때 포인터 복귀; 이후에는 이전 spec 재구축 | 항상 즉시 롤백: 이전 세대 유지비·따라잡기 비용을 수용할 때 |
@@ -697,9 +690,9 @@ Reference는 제출자의 문구/힌트 품질에 의존하고 중복·상충·�
 구현 담당 LLM은 먼저 다음을 확인하고 결정 기록을 남긴다.
 
 1. 이 문서의 PostgreSQL 원본 저장 대안을 채택하는가? 아니면 외부 원본 저장 계약이 필요한가?
-2. namespace 전체 Rebuild 기간의 입력 정지와 조건부 롤백을 허용하는가? 허용 중단 시간·첫 데이터 규모는 얼마인가?
+2. 서버 전체 Rebuild 기간의 입력 정지와 조건부 롤백을 허용하는가? 허용 중단 시간·첫 데이터 규모는 얼마인가?
 3. 사용할 호스트/CPU/커널, Ubuntu 20.04의 필수 여부, 컨테이너 유지보수 경로, 언어·SDK·DB·Copilot/두 번째 클라이언트의 정확한 버전은 무엇인가?
-4. private bearer 설정으로 검증할 것인가, 표준 MCP OAuth 상호운용이 Phase 0부터 필요한가? admin CLI/REST 중 하나와 namespace grants를 어떻게 배포할 것인가?
+4. private bearer 설정으로 검증할 것인가, 표준 MCP OAuth 상호운용이 Phase 0부터 필요한가? 관리 CLI와 기기별 권한을 어떻게 운영할 것인가?
 5. 실데이터 전에 백업 보존/RPO/RTO·최신 삭제 이력 보존·복구 공개 조건·로그 보존을 누가 확인하는가?
 6. 실제 evidence_refs는 **Phase 0 미지원**으로 차단하고 locator를 근거로 승격하지 않는가? §2.4의 수동 정정·재제출을 시험하는가?
 

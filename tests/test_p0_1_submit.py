@@ -1,4 +1,4 @@
-"""P0-1: storage, atomic acceptance, idempotency, scope isolation (design T1, T2, T8, T17, T18 parts)."""
+"""P0-1: storage, atomic acceptance, idempotency, principal authorization (design T1, T2, T8, T17, T18 parts)."""
 import threading
 
 import pytest
@@ -26,7 +26,7 @@ def test_accept_and_read_back_exact_text(world):
     receipt, replayed = world.submit(world.a["token"], "k1", world.body(MULTI))
     assert replayed is False
     assert receipt["status"] == "accepted" and receipt["searchability"] == "not_guaranteed"
-    assert receipt["generation_id"] == world.personal["generation_id"]
+    assert receipt["generation_id"] == world.active_generation_id
     exp = world.svc.get_experience(world.b["token"], receipt["experience_id"])
     assert exp["content"]["text"] == MULTI
     assert exp["submission"]["intent"] == "experience"
@@ -80,7 +80,7 @@ def test_t1_response_lost_after_commit_recovers_same_ids(world):
     assert world.counts()["experiences"] == 1
     receipt, replayed = world.submit(world.a["token"], "k-lost")
     assert replayed is True
-    row = world.query("SELECT id FROM experiences WHERE namespace_id=%s", (world.ns,))[0]
+    row = world.query("SELECT id FROM experiences")[0]
     assert receipt["experience_id"] == row["id"]
     assert world.counts() == {"experiences": 1, "jobs": 1, "receipts": 1}
 
@@ -126,13 +126,13 @@ def test_t2_concurrent_same_key_different_body_conflicts(world):
     assert world.counts()["experiences"] == 1
 
 
-def test_t2_key_scope_is_principal_and_namespace(world):
-    r1, _ = world.submit(world.a["token"], "same")
+def test_t2_key_scope_is_principal(world):
+    r1, rep1 = world.submit(world.a["token"], "same")
     r2, rep2 = world.submit(world.b["token"], "same")
-    r3, rep3 = world.submit(world.a["token"], "same", world.body(namespace_id=world.work["namespace_id"]))
-    assert not rep2 and not rep3
-    assert len({r1["experience_id"], r2["experience_id"], r3["experience_id"]}) == 3
-    assert world.counts(world.work["namespace_id"])["experiences"] == 1
+    r3, rep3 = world.submit(world.a["token"], "same")
+    assert not rep1 and not rep2 and rep3
+    assert r1["experience_id"] == r3["experience_id"] != r2["experience_id"]
+    assert world.counts()["experiences"] == 2
 
 
 # --- T17 / T18 ------------------------------------------------------------
@@ -206,23 +206,17 @@ def test_idempotency_key_validation(world, key):
     assert err(world.submit, world.a["token"], key).code == "INVALID_IDEMPOTENCY_KEY"
 
 
-# --- T8: scope isolation, auth ---------------------------------------------
-def test_t8_unauthorized_and_missing_look_identical(world):
+# --- T8: principal authorization ------------------------------------------
+def test_unauthorized_and_missing_objects_look_identical(world):
     r, _ = world.submit(world.a["token"], "k8")
     missing = "00000000-0000-4000-8000-000000000000"
-    # B has no grant on the work namespace; reader cannot write.
-    e_no_grant = err(world.submit, world.b["token"], "k8x", world.body(namespace_id=world.work["namespace_id"]))
-    e_missing_ns = err(world.submit, world.b["token"], "k8y", world.body(namespace_id=missing))
-    e_read_only = err(world.submit, world.reader["token"], "k8z")
-    for e in (e_no_grant, e_missing_ns, e_read_only):
-        assert (e.status, e.code, e.message) == (404, "NOT_FOUND", e_no_grant.message)
-    work_exp, _ = world.submit(world.a["token"], "k8w", world.body(namespace_id=world.work["namespace_id"]))
-    work_job = work_exp["job_id"]
-    for fn, ident in ((world.svc.get_experience, work_exp["experience_id"]), (world.svc.get_job, work_job)):
-        e1, e2 = err(fn, world.b["token"], ident), err(fn, world.b["token"], missing)
+    for principal in (world.outsider, world.reader):
+        assert err(world.submit, principal["token"], "k8-denied").status == 404
+    for fn, ident in ((world.svc.get_experience, r["experience_id"]), (world.svc.get_job, r["job_id"])):
+        e1 = err(fn, world.outsider["token"], ident)
+        e2 = err(fn, world.outsider["token"], missing)
         assert (e1.status, e1.code, e1.message) == (e2.status, e2.code, e2.message) == (404, "NOT_FOUND", e1.message)
     assert err(world.svc.get_experience, world.b["token"], "not-a-uuid").status == 404
-    # read-only principal can read shared data in its namespace
     assert world.svc.get_experience(world.reader["token"], r["experience_id"])["experience_id"] == r["experience_id"]
     assert world.svc.get_job(world.reader["token"], r["job_id"])["job_id"] == r["job_id"]
 
@@ -248,7 +242,7 @@ def test_hostile_text_is_stored_as_data(world):
 # --- gate, capacity, deletion --------------------------------------------
 def test_paused_gate_rejects_new_but_replays_existing(world):
     r, _ = world.submit(world.a["token"], "kp1")
-    world.query("UPDATE namespaces SET write_gate = 'paused' WHERE id = %s", (world.ns,))
+    world.pause_ingest()
     e = err(world.submit, world.a["token"], "kp2")
     assert (e.status, e.code, e.retryable) == (503, "INGEST_PAUSED", True)
     assert world.counts()["experiences"] == 1
@@ -258,11 +252,11 @@ def test_paused_gate_rejects_new_but_replays_existing(world):
 
 def test_capacity_is_rejected_not_evicted(world, database_url):
     svc = MemoryService(Config(database_url=database_url, hmac_key=world.config.hmac_key,
-                               max_retained_per_namespace=2))
+                               max_retained=2))
     for i in range(2):
         svc.submit(world.a["token"], world.body(), "kc%d" % i)
     e = err(svc.submit, world.a["token"], world.body(), "kc-over")
-    assert (e.status, e.code) == (409, "NAMESPACE_CAPACITY")
+    assert (e.status, e.code) == (409, "MEMORY_CAPACITY")
     assert world.counts()["experiences"] == 2
 
 
@@ -289,15 +283,12 @@ def test_deleted_experience_is_410_and_not_resubmitted(world):
 def test_db_rejects_inconsistent_rows(world):
     import psycopg2
     with pytest.raises(psycopg2.errors.CheckViolation):  # deleted must not retain text
-        world.query("INSERT INTO experiences (id, namespace_id, raw_text, state, created_by, deleted_at) "
-                    "VALUES (md5(random()::text)::uuid, %s, 'x', 'deleted', %s, now())",
-                    (world.ns, world.a["principal_id"]))
+        world.query("INSERT INTO experiences (id, raw_text, state, created_by, deleted_at) "
+                    "VALUES (md5(random()::text)::uuid, 'x', 'deleted', %s, now())", (world.a["principal_id"],))
     with pytest.raises(psycopg2.errors.CheckViolation):  # manage requires write
-        world.query("UPDATE namespace_grants SET can_manage = true, can_write = false WHERE principal_id = %s "
-                    "AND namespace_id = %s", (world.reader["principal_id"], world.ns))
-    with pytest.raises(psycopg2.errors.ForeignKeyViolation):  # job cannot cross namespaces
-        r, _ = world.submit(world.a["token"], "kfk")
-        world.query("INSERT INTO jobs (id, namespace_id, generation_id, experience_id, source_version, "
-                    "requested_by, authority_epoch, state) VALUES (md5(random()::text)::uuid, %s, %s, %s, 1, %s, 1, "
-                    "'queued')", (world.work["namespace_id"], world.work["generation_id"], r["experience_id"],
-                                  world.a["principal_id"]))
+        world.query("UPDATE principals SET can_manage = true WHERE id = %s", (world.reader["principal_id"],))
+    r, _ = world.submit(world.a["token"], "kfk")
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):  # source version must exist
+        world.query("INSERT INTO jobs (id, generation_id, experience_id, source_version, "
+                    "requested_by, authority_epoch, state) VALUES (md5(random()::text)::uuid, %s, %s, 2, %s, 1, "
+                    "'queued')", (world.active_generation_id, r["experience_id"], world.a["principal_id"]))

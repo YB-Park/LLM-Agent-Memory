@@ -27,14 +27,14 @@ def add_generation(world, experience_id, source_job_id, state="building", versio
     """Second generation (as P0-4 rebuild will create one) with a real queued Job for the same source."""
     spec = reference_spec(version)
     gen = str(uuid.uuid4())
-    world.query("INSERT INTO generations (id, namespace_id, engine_spec, spec_digest, index_profile, state, "
-                "snapshot_ingest_revision) VALUES (%s, %s, %s, %s, 'reference-keywords/v1', %s, 0)",
-                (gen, world.ns, Json(spec), spec_digest(spec), state))
+    world.query("INSERT INTO generations (id, engine_spec, spec_digest, index_profile, state, "
+                "snapshot_ingest_revision) VALUES (%s, %s, %s, 'reference-keywords/v1', %s, 0)",
+                (gen, Json(spec), spec_digest(spec), state))
     old = world.job(source_job_id)
     job = str(uuid.uuid4())
-    world.query("INSERT INTO jobs (id, namespace_id, generation_id, experience_id, source_version, input_digest, "
-                "requested_by, authority_epoch, state) VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 'queued')",
-                (job, world.ns, gen, experience_id, old["input_digest"], old["requested_by"],
+    world.query("INSERT INTO jobs (id, generation_id, experience_id, source_version, input_digest, "
+                "requested_by, authority_epoch, state) VALUES (%s, %s, %s, 1, %s, %s, %s, 'queued')",
+                (job, gen, experience_id, old["input_digest"], old["requested_by"],
                  old["authority_epoch"]))
     return gen, job
 
@@ -158,14 +158,15 @@ def test_delete_invalidates_results_in_every_generation_and_stays_after_reuse(wo
     assert world.job(job2)["state"] == "succeeded"
     assert len(world.artifacts()) == 2
     revs = {str(g["id"]): g["result_revision"] for g in world.query(
-        "SELECT id, result_revision FROM generations WHERE namespace_id = %s", (world.ns,))}
+        "SELECT id, result_revision FROM generations")}
     delete(world, r["experience_id"])
     assert world.artifacts() == [] and len(world.artifacts(state="invalidated")) == 2
-    for g in world.query("SELECT id, result_revision FROM generations WHERE namespace_id = %s", (world.ns,)):
+    for g in world.query("SELECT id, result_revision FROM generations"):
         assert g["result_revision"] == revs[str(g["id"])] + 1
     # even if the old generation is made servable/active, nothing is visible and nothing can be retried
-    world.query("UPDATE generations SET state = 'servable' WHERE id = %s", (gen2,))
-    world.query("UPDATE namespaces SET active_generation_id = %s WHERE id = %s", (gen2, world.ns))
+    world.query("UPDATE generations SET state = 'retired' WHERE state = 'servable'; "
+                "UPDATE generations SET state = 'servable' WHERE id = %s; "
+                "UPDATE system_control SET active_generation_id = %s", (gen2, gen2))
     assert world.search(world.a["token"], "zebra_token")["results"] == []
 
 
@@ -262,9 +263,9 @@ def test_revoke_waits_for_inflight_finalize_which_stays_published(world):
     assert len(world.search(world.b["token"], "lastfact")["results"]) == 1
 
 
-def test_grant_reduction_fences_open_jobs(world):
+def test_permission_reduction_fences_open_jobs(world):
     r = world.explicit(world.a["token"], "v6", "권한 축소 reducedfact")
-    out = admin.grant(world.dsn, world.a["principal_id"], world.ns, read=True)  # write removed
+    out = admin.set_permissions(world.dsn, world.a["principal_id"], read=True)  # write removed
     assert out["jobs_cancelled"] == 1
     assert world.job(r["job_id"])["error_code"] == "AUTHORITY_REVOKED"
     assert world.drain() == []
@@ -283,7 +284,7 @@ def cancelled_job_of_a(world, key, text):
 
 def test_manage_principal_retries_cancelled_job_under_its_own_authority(world):
     r = cancelled_job_of_a(world, "m1", "재시도 대상 retryfact")
-    admin.grant(world.dsn, world.b["principal_id"], world.ns, manage=True)
+    admin.set_permissions(world.dsn, world.b["principal_id"], manage=True)
     attempt = world.job(r["job_id"])["attempt"]
     out = operations.retry_job(world.config, world.b["principal_id"], r["job_id"], attempt)
     assert out["state"] == "queued" and out["requested_by"] == world.b["principal_id"]
@@ -307,7 +308,7 @@ def test_retry_requires_manage_and_matching_attempt(world):
     with pytest.raises(ServiceError) as e:  # B can write but not manage
         operations.retry_job(world.config, world.b["principal_id"], r["job_id"], attempt)
     assert e.value.status == 404
-    admin.grant(world.dsn, world.b["principal_id"], world.ns, manage=True)
+    admin.set_permissions(world.dsn, world.b["principal_id"], manage=True)
     with pytest.raises(ServiceError) as e:
         operations.retry_job(world.config, world.b["principal_id"], r["job_id"], attempt + 5)
     assert (e.value.status, e.value.code) == (409, "STALE_ATTEMPT")
@@ -319,7 +320,7 @@ def test_retry_requires_manage_and_matching_attempt(world):
 
 
 def test_retry_refused_for_deleted_source_succeeded_job_and_retired_generation(world):
-    admin.grant(world.dsn, world.b["principal_id"], world.ns, manage=True)
+    admin.set_permissions(world.dsn, world.b["principal_id"], manage=True)
     b = world.b["principal_id"]
     done = world.explicit(world.a["token"], "m3", "성공한 작업 okfact")
     world.drain()
@@ -347,7 +348,7 @@ def test_failed_job_after_attempt_exhaustion_can_be_retried_with_fresh_budget(wo
     r = world.explicit(world.a["token"], "m6", "한도 소진 exhaustfact")
     world.query("UPDATE jobs SET state = 'failed', error_code = 'LEASE_EXPIRED', retry_count = 3, attempt = 3, "
                 "completed_at = now() WHERE id = %s", (r["job_id"],))
-    admin.grant(world.dsn, world.a["principal_id"], world.ns, manage=True)
+    admin.set_permissions(world.dsn, world.a["principal_id"], manage=True)
     operations.retry_job(world.config, world.a["principal_id"], r["job_id"], 3)
     job = world.job(r["job_id"])
     assert job["state"] == "queued" and job["retry_count"] == 0 and job["error_code"] is None
@@ -374,9 +375,9 @@ def test_admin_cli_commands_and_no_public_admin_surface(world, monkeypatch, caps
     assert e.value.code == 1
 
     with RunningServer(world.config) as running:
-        for method, path in (("DELETE", "/v1/experiences/" + r["experience_id"]),
-                             ("POST", "/v1/admin/principals/%s/revoke" % world.a["principal_id"]),
-                             ("POST", "/v1/admin/jobs/%s/retry" % r["job_id"])):
+        for method, path in (("DELETE", "/v2/experiences/" + r["experience_id"]),
+                             ("POST", "/v2/admin/principals/%s/revoke" % world.a["principal_id"]),
+                             ("POST", "/v2/admin/jobs/%s/retry" % r["job_id"])):
             req = urllib.request.Request(running.base + path, method=method, data=b"{}",
                                          headers={"Authorization": "Bearer " + world.a["token"]})
             with pytest.raises(urllib.error.HTTPError) as err:

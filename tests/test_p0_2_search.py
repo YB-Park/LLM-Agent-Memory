@@ -2,12 +2,11 @@
 import pytest
 
 from conftest import World  # noqa: F401  (fixture module)
-from memory_server import admin
 from memory_server.errors import ServiceError
 
 
-def submit_plain(world, token, key, text, namespace_id=None):
-    return world.svc.submit(token, world.body(text, namespace_id), key)[0]
+def submit_plain(world, token, key, text):
+    return world.svc.submit(token, world.body(text), key)[0]
 
 
 def ids(res):
@@ -21,7 +20,7 @@ def code_of(exc):
 def test_results_absent_until_worker_runs_and_report_pending(world):
     world.explicit(world.a["token"], "s1", "배포 DB는 PostgreSQL이다")
     res = world.search(world.a["token"], "PostgreSQL")
-    assert res["results"] == [] and res["indexing"] == {"scope": "namespace", "has_pending": True,
+    assert res["results"] == [] and res["indexing"] == {"has_pending": True,
                                                          "has_failed": False}
     world.drain()
     res = world.search(world.a["token"], "PostgreSQL")
@@ -96,21 +95,15 @@ def test_limit_and_excerpt_budget(world):
 
 
 def test_read_only_reader_searches_but_outsiders_and_anonymous_do_not(world):
-    world.explicit(world.a["token"], "p1", "비공개 업무 메모 secretplan", namespace_id=world.work["namespace_id"])
-    world.explicit(world.a["token"], "p2", "개인 공개 메모 sharedplan")
+    world.explicit(world.a["token"], "p2", "공개 메모 sharedplan")
     world.drain()
-    assert len(world.search(world.reader["token"], "sharedplan")["results"]) == 1
-    # reader has no grant on work: indistinguishable from a missing namespace
+    for principal in (world.reader, world.b):
+        assert len(world.search(principal["token"], "sharedplan")["results"]) == 1
     with pytest.raises(ServiceError) as exc:
-        world.search(world.reader["token"], "secretplan", namespace_id=world.work["namespace_id"])
+        world.search(world.outsider["token"], "sharedplan")
     assert code_of(exc) == "NOT_FOUND"
-    # B has no grant on work either, and personal results never contain work text
     with pytest.raises(ServiceError) as exc:
-        world.search(world.b["token"], "secretplan", namespace_id=world.work["namespace_id"])
-    assert code_of(exc) == "NOT_FOUND"
-    assert world.search(world.b["token"], "secretplan")["results"] == []
-    with pytest.raises(ServiceError) as exc:
-        world.svc.search(None, {"namespace_id": world.ns, "query": "x"})
+        world.svc.search(None, {"query": "x"})
     assert exc.value.status == 401
 
 
@@ -129,19 +122,18 @@ def test_read_only_reader_searches_but_outsiders_and_anonymous_do_not(world):
 ])
 def test_validation_errors(world, extra, code):
     with pytest.raises(ServiceError) as exc:
-        world.svc.search(world.a["token"], dict({"namespace_id": world.ns}, **extra))
+        world.svc.search(world.a["token"], extra)
     assert exc.value.status == 400 and exc.value.code == code
 
 
 def test_literal_baseline_profile(world):
-    ns = admin.create_namespace(world.dsn, "lit-" + world.ns[:6], index_profile="literal-substring/v1")
-    admin.grant(world.dsn, world.a["principal_id"], ns["namespace_id"], write=True)
-    world.explicit(world.a["token"], "lit1", "배포 DB는 PostgreSQL을 사용한다.", namespace_id=ns["namespace_id"])
+    world.switch_engine(index_profile="literal-substring/v1")
+    world.explicit(world.a["token"], "lit1", "배포 DB는 PostgreSQL을 사용한다.")
     world.drain()
-    res = world.search(world.a["token"], "PostgreSQL을 사용", namespace_id=ns["namespace_id"])
+    res = world.search(world.a["token"], "PostgreSQL을 사용")
     assert res["index_profile"] == "literal-substring/v1" and len(res["results"]) == 1
     with pytest.raises(ServiceError) as exc:
-        world.search(world.a["token"], "x", namespace_id=ns["namespace_id"], keywords=["x"])
+        world.search(world.a["token"], "x", keywords=["x"])
     assert exc.value.code == "UNSUPPORTED_SEARCH_OPTION"
 
 
@@ -179,23 +171,20 @@ def test_known_limit_substring_false_positive(world):
 
 
 def test_known_limit_literal_misses_natural_language_question(world):
-    ns = admin.create_namespace(world.dsn, "lit2-" + world.ns[:6], index_profile="literal-substring/v1")
-    admin.grant(world.dsn, world.a["principal_id"], ns["namespace_id"], write=True)
-    for n in (world.ns, ns["namespace_id"]):
-        world.explicit(world.a["token"], "k5-" + n[:4], "배포 DB는 PostgreSQL을 사용한다.", namespace_id=n)
+    world.explicit(world.a["token"], "k5", "배포 DB는 PostgreSQL을 사용한다.")
     world.drain()
     question = "어떤 DB를 쓰는지 PostgreSQL 알려줘"
     assert len(world.search(world.a["token"], question)["results"]) == 1
-    assert world.search(world.a["token"], question, namespace_id=ns["namespace_id"])["results"] == []
+    world.switch_engine(index_profile="literal-substring/v1")
+    assert world.search(world.a["token"], question)["results"] == []
 
 
 def test_paragraph_projection_search_returns_span(world):
-    admin_ns = admin.create_namespace(world.dsn, "p2-" + world.ns[:6], engine_version="2")
-    admin.grant(world.dsn, world.a["principal_id"], admin_ns["namespace_id"], write=True)
+    world.switch_engine("2")
     text = "첫 문단 apple\n\n둘째 문단 banana\n\n셋째 문단 cherry"
-    r = submit_plain(world, world.a["token"], "pp1", text, admin_ns["namespace_id"])
+    r = submit_plain(world, world.a["token"], "pp1", text)
     world.drain()
-    res = world.search(world.a["token"], "banana", namespace_id=admin_ns["namespace_id"])
+    res = world.search(world.a["token"], "banana")
     [hit] = res["results"]
     assert res["engine"] == "reference/2" and hit["text"] == "둘째 문단 banana"
     assert hit["engine_data"]["representation"] == "source_projection_paragraph"

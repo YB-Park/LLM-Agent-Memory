@@ -9,7 +9,7 @@ from psycopg2.extras import Json
 from . import hooks, ledger
 from .db import run_tx
 from .errors import ServiceError, not_found
-from .service import _grant, _lock_control
+from .service import _lock_control
 from .validation import parse_uuid
 
 NON_TERMINAL = ("queued", "running")
@@ -29,12 +29,12 @@ def _fence_jobs(cur, where, params, code):
 
 
 def fence_principal_jobs(cur, principal_id, code="AUTHORITY_REVOKED"):
-    """Used by revoke and by grant reduction: the principal's open jobs lose their authority (§6.5)."""
+    """Used by revoke and by permission reduction: the principal's open jobs lose their authority (§6.5)."""
     return _fence_jobs(cur, "requested_by = %s", (principal_id,), code)
 
 
 def lock_policy(cur):
-    _lock_control(cur, exclusive=True, allow_quarantined=True)
+    return _lock_control(cur, exclusive=True, allow_quarantined=True)
 
 
 def bump_policy(cur):
@@ -49,11 +49,10 @@ def delete_experience(config, experience_id, actor_id=None):
 
 def _delete_tx(cur, exp_id, actor_id, ledger_path=""):
     lock_policy(cur)
-    cur.execute("SELECT id, namespace_id, state FROM experiences WHERE id = %s FOR UPDATE", (exp_id,))
+    cur.execute("SELECT id, state FROM experiences WHERE id = %s FOR UPDATE", (exp_id,))
     exp = cur.fetchone()
     if exp is None:
         raise not_found()
-    ns_id = exp["namespace_id"]
     if exp["state"] == "deleted":
         return _delete_body(exp_id, 0, 0, already=True)
     ledger.append(ledger_path, "delete_experience", {"experience_id": str(exp_id)})
@@ -73,7 +72,7 @@ def _delete_tx(cur, exp_id, actor_id, ledger_path=""):
         cur.execute("UPDATE generations SET result_revision = result_revision + 1 WHERE id = ANY(%s::uuid[])",
                     (sorted(touched),))
     bump_policy(cur)
-    _audit(cur, "experience_deleted", actor_id, {"experience_id": str(exp_id), "namespace_id": str(ns_id)},
+    _audit(cur, "experience_deleted", actor_id, {"experience_id": str(exp_id)},
            {"artifacts_invalidated": len(invalidated), "jobs_cancelled": len(fenced)})
     return _delete_body(exp_id, len(invalidated), len(fenced), already=False)
 
@@ -118,16 +117,21 @@ def retry_job(config, principal_id, job_id, expected_attempt):
     return run_tx(config, lambda cur: _retry_tx(cur, pid, jid, expected_attempt))
 
 
+def _require_manager(cur, principal_id):
+    cur.execute("SELECT auth_epoch FROM principals WHERE id = %s AND revoked_at IS NULL AND can_manage",
+                (principal_id,))
+    who = cur.fetchone()
+    if who is None:
+        raise not_found()
+    return who
+
+
 def _retry_tx(cur, pid, jid, expected_attempt):
     lock_policy(cur)
-    cur.execute("SELECT id, auth_epoch, revoked_at FROM principals WHERE id = %s", (pid,))
-    who = cur.fetchone()
+    who = _require_manager(cur, pid)
     cur.execute("SELECT * FROM jobs WHERE id = %s FOR UPDATE", (jid,))
     job = cur.fetchone()
-    if who is None or who["revoked_at"] is not None or job is None:
-        raise not_found()
-    grant = _grant(cur, pid, job["namespace_id"])
-    if grant is None or not grant["can_manage"]:
+    if job is None:
         raise not_found()
     if job["attempt"] != expected_attempt:
         if (job["attempt"] > expected_attempt and job["requested_by"] == pid
@@ -146,7 +150,7 @@ def _retry_tx(cur, pid, jid, expected_attempt):
                 "error_code = NULL, not_before = now(), lease_owner = NULL, lease_until = NULL, "
                 "completed_at = NULL WHERE id = %s RETURNING *", (pid, who["auth_epoch"], jid))
     new = cur.fetchone()
-    _audit(cur, "job_retried", pid, {"job_id": str(jid), "namespace_id": str(job["namespace_id"])},
+    _audit(cur, "job_retried", pid, {"job_id": str(jid)},
            {"previous_principal_id": str(job["requested_by"]), "new_principal_id": str(pid),
             "previous_state": job["state"], "previous_error_code": job["error_code"]})
     return _retry_body(new, already=False)

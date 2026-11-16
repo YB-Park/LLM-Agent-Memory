@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from .errors import invalid, ServiceError
 
-_TOP = {"namespace_id", "content", "source", "submission"}
+_TOP = {"content", "source", "submission"}
 _SOURCE_FIELDS = ("kind", "source_ref", "source_revision", "session_ref", "occurred_at", "harness")
 _SUBMISSION_FIELDS = {"intent", "actor_reported", "title", "retrieval_hints"}
 _INTENTS = ("experience", "explicit_memory")
@@ -144,7 +144,6 @@ def validate_submit(body, config):
     extra = set(body) - _TOP
     if extra:
         raise invalid("unknown field: %s" % sorted(extra)[0], "UNKNOWN_FIELD")
-    namespace_id = parse_uuid(body.get("namespace_id"), "namespace_id")
     content = body.get("content")
     if not isinstance(content, dict) or set(content) - {"media_type", "text"}:
         raise invalid("content must be an object with media_type and text")
@@ -156,12 +155,13 @@ def validate_submit(body, config):
     meta_size = len(canonical_json({"source": source, "submission": submission}).encode("utf-8"))
     if meta_size > config.max_metadata_bytes:
         raise ServiceError(413, "PAYLOAD_TOO_LARGE", "metadata exceeds %d bytes" % config.max_metadata_bytes)
-    return {"namespace_id": namespace_id, "text": text, "source": source, "submission": submission}
+    return {"text": text, "source": source, "submission": submission}
 
 
-def request_digest(config, inp):
-    doc = {"api_version": "v1", "namespace_id": inp["namespace_id"], "text": inp["text"],
-           "source": inp["source"], "submission": inp["submission"]}
+def request_digest(config, inp, legacy_id=None):
+    doc = {"api_version": "v2", "text": inp["text"], "source": inp["source"], "submission": inp["submission"]}
+    if legacy_id is not None:
+        doc.update(api_version="v1", namespace_id=legacy_id)
     return hmac_hex(config.hmac_key, canonical_json(doc))
 
 

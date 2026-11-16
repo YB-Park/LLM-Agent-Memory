@@ -29,7 +29,7 @@ class Config:
     max_text_bytes: int = 65536
     max_request_bytes: int = 96 * 1024
     max_metadata_bytes: int = 4096
-    max_retained_per_namespace: int = 1000
+    max_retained: int = 1000
     max_open_jobs: int = 10000
     lock_timeout_ms: int = 1000
     statement_timeout_ms: int = 2000

@@ -1,6 +1,6 @@
 # VS Code Copilot Agent 연결과 C1~C8 시험 가이드
 
-> **상태: 실제 VS Code Copilot 검증은 수행하지 못했다(미검증).** 개발 환경에는 VS Code GUI, Copilot 로그인, 사용자 PC·원격 호스트가 없다. 아래 "자동 검증" 열은 **공식 MCP Python 클라이언트(SDK 2.3.0)로 실제 프로토콜**(HTTPS Streamable HTTP, 초기화, 도구 목록, 도구 호출)을 사용한 시험이며, Copilot이 도구를 호출하는지·답변에 쓰는지는 전혀 확인하지 않았다. 따라서 **P0-5는 부분 완료**다.
+> **상태: 실제 VS Code Copilot 검증은 수행하지 못했다(미검증).** 개발 환경에는 VS Code GUI, Copilot 로그인, 사용자 PC·원격 호스트가 없다. 아래 "자동 검증" 열은 **공식 MCP Python 클라이언트(SDK 2.3.0)로 실제 프로토콜**(Streamable HTTP 초기화, 도구 목록, 도구 호출)을 사용한 시험이며, Copilot이 도구를 호출하는지·답변에 쓰는지는 전혀 확인하지 않았다. 따라서 **P0-5는 부분 완료**다.
 
 ## 1. 연결 설정
 
@@ -16,13 +16,18 @@
 
 ```bash
 A="docker compose --profile tools run --rm -T admin"
-$A create-namespace --name personal                     # namespace_id 기록
-$A create-principal --name pc-a ; $A create-principal --name pc-b
-$A grant --principal <A> --namespace <ns> --read --write
-$A grant --principal <B> --namespace <ns> --read --write
+$A create-principal --name pc-a
+$A create-principal --name pc-b
+$A set-permissions --principal "$PC_A_ID" --write
+$A set-permissions --principal "$PC_B_ID" --write
 ```
 
-PC A와 PC B(또는 두 VS Code 프로필)에 각각 다른 토큰을 설정한다. **namespace_id를 Copilot에게 알려 주어야** 한다(도구 인자). 예: 지침 파일에 "memory 도구의 namespace_id는 <UUID>".
+발급된 Principal ID를 각각 `PC_A_ID`, `PC_B_ID`에 설정한다. PC A와 PC B(또는 두 VS Code 프로필)에 각각 다른 토큰을 넣는다. 기존 설치에서 MCP 서버를 다시 연결해 도구 목록을 갱신하고, 도구 호출과 Copilot 지침에서 `namespace_id`를 삭제한다. 해당 필드를 보내면 호출이 거절된다.
+
+```python
+memory_submit(text="배포 DB는 PostgreSQL이다.", idempotency_key="db-1", intent="explicit_memory")
+memory_search(query="배포 DB")
+```
 
 ## 3. 시나리오
 
@@ -30,12 +35,12 @@ PC A와 PC B(또는 두 VS Code 프로필)에 각각 다른 토큰을 설정한�
 
 | ID | 절차 | 기대 | 자동 시험(MCP 프로토콜 클라이언트) | Copilot 수동 |
 | --- | --- | --- | --- | --- |
-| C1 명시적 저장 | "우리 프로젝트의 배포 DB는 PostgreSQL이라는 것을 기억해" | `memory_submit(intent=explicit_memory, actor_reported=agent)`, receipt+job_id, `memory_job_status`가 succeeded, Artifact 원문=제출 문구. 접수 성공≠기억 생성 | **자동 확인**(`test_explicit_memory_roundtrip_over_mcp`, compose e2e) | **필요** |
+| C1 명시적 저장 | "우리 프로젝트의 배포 DB는 PostgreSQL이라는 것을 기억해" | `memory_submit(intent=explicit_memory, actor_reported=agent)`, receipt+job_id, `memory_job_status`가 succeeded, Artifact 원문=제출 문구. 접수 성공≠기억 생성 | **자동 확인**(`test_explicit_memory_roundtrip_over_mcp`) | **필요** |
 | C2 새 세션 회상 | 새 세션(이전 대화 없음)에서 "우리 프로젝트에서 어떤 DB를 사용하기로 했지?" | 실제 `memory_search` 호출, 결과의 출처·엔진 버전 표시 | 서버 측 검색·출처는 자동 확인. **에이전트의 호출 여부는 확인 불가** | **필요** |
 | C3 키워드 재시도 | 다른 표현("데이터베이스")으로 질문 → query만 검색 결과를 기록 → `keywords=[...]` 재시도 | 첫 miss를 숨기지 않고 별도 기록 | 키워드/힌트 일치는 Phase 0 시험이 확인 | **필요** |
 | C4 한영·코드 | PostgreSQL 대소문자, `foo_bar`, `parseHTTPResponse`, `C++/std::vector`(명시 keywords) | 한계 사례는 실패로 기록 | 일부 자동(P0-2) | 필요 |
 | C5 출처·신뢰 | `memory_get_source`로 primary Experience 확인 | agent 제출/사용자 주장/locator-only/투영을 구분하고 "검증된 사실"로 말하지 않음 | 도구 응답 필드는 자동 확인 | **답변 표현 관찰 필요** |
-| C6 공유와 삭제 | PC B에서 같은 기억 조회 → A 철회 후 A 거부·B 유지 → 관리자 삭제·정정 후 재등장 없음 | | 자동 확인(`test_revoking_a_device...`, e2e) | 실제 기기로는 필요 |
+| C6 공유와 삭제 | PC B에서 같은 기억 조회 → A 철회 후 A 거부·B 유지 → 관리자 삭제·정정 후 재등장 없음 | | 자동 확인(`test_revoking_a_device...`) | 실제 기기로는 필요 |
 | C7 버전 비교 | reference/1 vs 2 Generation 비교 | | 자동 확인(P0-4, CLI) | Copilot 불필요 |
 | C8 자동 호출 | "검색 도구를 쓰라"는 말 없이 새 세션에서 질문 | 아래 3분류 | **자동 확인 불가** | **필요** |
 

@@ -1,4 +1,4 @@
-"""Backup, quarantined restore and policy re-application (P0-5; docs/operations/backup-and-recovery.md).
+"""Backup, quarantined restore and policy re-application (P0-5; docs/operations/backup-recovery.md).
 
 Invariant: a deleted source or a revoked/reduced credential must not come back because an older backup was
 restored. A backup cannot know about later policy changes, so the policy ledger (ledger.py, kept outside the
@@ -21,13 +21,18 @@ import tempfile
 import time
 from urllib.parse import parse_qs, unquote, urlparse
 
+import psycopg2
+from psycopg2.extras import Json
+
 from . import ledger, operations
 from .config import Config, _setting
 from .db import connect
 from .errors import ServiceError
-from .migrate import provision_roles
+from .migrate import migrate
+from .service import legacy_namespace
+from .validation import parse_uuid
 
-FORMAT = 1
+FORMAT = 2
 
 
 class RecoveryError(Exception):
@@ -135,7 +140,7 @@ def _open_archive(archive, passphrase_file):
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r") as tar:
         manifest = json.loads(tar.extractfile("manifest.json").read())
         dump = tar.extractfile("db.dump").read()
-    if manifest.get("format") != FORMAT or hashlib.sha256(dump).hexdigest() != manifest.get("dump_sha256"):
+    if manifest.get("format") not in (1, FORMAT) or hashlib.sha256(dump).hexdigest() != manifest.get("dump_sha256"):
         raise RecoveryError("backup archive is corrupt or has an unknown format")
     return manifest, dump
 
@@ -152,39 +157,54 @@ def restore(config, target_database_url, archive, passphrase_file, runtime_role=
     if existing:
         raise RecoveryError("refusing to restore: the target database is not empty (restore only into a fresh "
                             "database, never over live data)")
-    with tempfile.NamedTemporaryFile(dir=tempfile.gettempdir(), prefix="memory-restore-") as fh:
-        os.chmod(fh.name, 0o600)
-        fh.write(dump)
-        fh.flush()
-        _run(["pg_restore", "--no-owner", "--no-acl", "--exit-on-error", "--single-transaction",
-              "--dbname=" + _pg_env(target_database_url)["PGDATABASE"], fh.name], _pg_env(target_database_url))
+    env = _pg_env(target_database_url)
+    # Commit the dump and the quarantine together. There is no serving-state
+    # interval, even if a client already points at the target database.
     conn = connect(target_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE system_control SET service_state = 'quarantined', service_state_changed_at = now()")
-            provision_roles(cur, runtime_role, backup_role)
-            operations._audit(cur, "recovery_restored", None, {}, {"backup_created_at": manifest["created_at"],
-                                                                    "ledger_head": manifest["ledger_head"]})
-        conn.commit()
+            metadata = Json({"backup_created_at": manifest["created_at"], "ledger_head": manifest["ledger_head"],
+                             "hmac_key_id": manifest["hmac_key_id"]})
+            quarantine_sql = cur.mogrify(
+                "UPDATE public.system_control SET service_state = 'quarantined', service_state_changed_at = now() "
+                "WHERE id = 1; "
+                "INSERT INTO public.audit_events (event_type, safe_details) VALUES ('recovery_restored', %s);",
+                (metadata,))
     finally:
         conn.close()
+    with tempfile.NamedTemporaryFile(prefix="memory-dump-") as archive_file, \
+            tempfile.NamedTemporaryFile(prefix="memory-restore-sql-") as sql_file:
+        archive_file.write(dump)
+        archive_file.flush()
+        _run(["pg_restore", "--no-owner", "--no-acl", "--file", sql_file.name, archive_file.name], env)
+        with open(sql_file.name, "ab") as script:
+            script.write(b"\n" + quarantine_sql + b"\n")
+        _run(["psql", "-X", "--no-password", "--single-transaction", "--set=ON_ERROR_STOP=1", "--file", sql_file.name],
+             env)
+    try:
+        migrate(target_database_url, runtime_role=runtime_role, backup_role=backup_role)
+    except psycopg2.Error as exc:
+        raise RecoveryError("restored database stays quarantined: %s" % exc.diag.message_primary) from exc
     warnings = []
     if manifest["hmac_key_id"] != _key_fingerprint(config):
-        warnings.append("MEMORY_HMAC_KEY differs from the backup's key: restored credentials will not validate")
+        warnings.append("MEMORY_HMAC_KEY differs from the backup's key: release will be refused")
     if manifest["ledger_head"] is None:
         warnings.append("the backup was taken without a policy ledger: release will be refused")
     return {"state": "quarantined", "manifest": manifest, "warnings": warnings}
 
 
-def _manifest_of(config, target_dsn):
-    """Recorded head of the last restore; used to detect a ledger that is older than the backup."""
-    conn = connect(target_dsn)
-    try:
-        rows = _all(conn, "SELECT safe_details FROM audit_events WHERE event_type = 'recovery_restored' "
-                          "ORDER BY id DESC LIMIT 1")
-    finally:
-        conn.close()
-    return rows[0]["safe_details"] if rows else None
+def _lock_restore(cur):
+    control = operations.lock_policy(cur)
+    if "active_generation_id" not in control:
+        raise RecoveryError("schema upgrade incomplete: the restore cannot be verified or released")
+    return control
+
+
+def _restore_record(cur):
+    cur.execute("SELECT safe_details FROM audit_events WHERE event_type = 'recovery_restored' "
+                "ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    return row["safe_details"] if row else None
 
 
 # --- ledger replay ----------------------------------------------------------
@@ -199,21 +219,22 @@ def reapply(config, target_database_url, ledger_path=None, revoke_all_principals
         entries, head_seq, head_hash = ledger.verify(ledger_path)
     except ledger.LedgerError as exc:
         raise RecoveryError("policy ledger is not trustworthy: %s" % exc)
-    recorded = _manifest_of(config, target_database_url)
-    if recorded is None:
-        raise RecoveryError("target database was not produced by `restore`; refusing to re-apply")
-    bhead = recorded["ledger_head"]
-    if bhead is None:
-        raise RecoveryError("the backup recorded no ledger head: its policy history cannot be proven complete")
-    if head_seq < bhead["seq"] or (bhead["seq"] > 0 and entries[bhead["seq"] - 1]["hash"] != bhead["hash"]):
-        raise RecoveryError("policy ledger is older than, or diverges from, the backup's recorded head: "
-                            "refusing to re-apply (an out-of-date ledger would re-expose deleted data)")
-    stats = {"delete_experience": 0, "revoke_principal": 0, "grant_reduce": 0, "absent": 0}
+    stats = {"delete_experience": 0, "revoke_principal": 0, "grant_reduce": 0,
+             "permission_reduce": 0, "absent": 0}
 
     def fn(cur):
-        cur.execute("SELECT service_state FROM system_control WHERE id = 1 FOR UPDATE")
-        if cur.fetchone()["service_state"] != "quarantined":
+        control = _lock_restore(cur)
+        if control["service_state"] != "quarantined":
             raise RecoveryError("reapply only runs on a quarantined database")
+        recorded = _restore_record(cur)
+        if recorded is None:
+            raise RecoveryError("target database was not produced by restore; refusing to re-apply")
+        bhead = recorded["ledger_head"]
+        if bhead is None:
+            raise RecoveryError("the backup recorded no ledger head: its policy history cannot be proven complete")
+        if (head_seq < bhead["seq"]
+                or (bhead["seq"] > 0 and entries[bhead["seq"] - 1]["hash"] != bhead["hash"])):
+            raise RecoveryError("policy ledger is older than, or diverges from, the backup's recorded head")
         for entry in entries:
             kind, data = entry["type"], entry["data"]
             try:
@@ -222,7 +243,7 @@ def reapply(config, target_database_url, ledger_path=None, revoke_all_principals
                 elif kind == "revoke_principal":
                     operations._revoke_tx(cur, data["principal_id"], None)
                 else:
-                    _reduce_grant(cur, data)
+                    _reduce_permissions(cur, _permission_event(cur, kind, data))
                 stats[kind] += 1
             except ServiceError as exc:
                 if exc.code != "NOT_FOUND":
@@ -255,95 +276,129 @@ def reapply(config, target_database_url, ledger_path=None, revoke_all_principals
     return stats
 
 
-def _reduce_grant(cur, data):
-    """Grants only ever shrink on replay (AND with the logged flags); re-granting is a deliberate operator action."""
-    cur.execute("SELECT can_read, can_write, can_manage FROM namespace_grants WHERE principal_id = %s AND "
-                "namespace_id = %s FOR UPDATE", (data["principal_id"], data["namespace_id"]))
-    row = cur.fetchone()
-    if row is None:
-        raise ServiceError(404, "NOT_FOUND", "absent")
-    cur.execute("UPDATE namespace_grants SET can_read = can_read AND %s, can_write = can_write AND %s, "
-                "can_manage = can_manage AND %s WHERE principal_id = %s AND namespace_id = %s",
-                (data["read"], data["write"], data["manage"], data["principal_id"], data["namespace_id"]))
-    cur.execute("UPDATE principals SET auth_epoch = auth_epoch + 1 WHERE id = %s", (data["principal_id"],))
-    operations.fence_principal_jobs(cur, data["principal_id"])
+def _permission_event(cur, kind, data):
+    if kind == "grant_reduce":
+        legacy_id = legacy_namespace(cur)
+        if legacy_id is None or data.get("namespace_id") != legacy_id:
+            raise RecoveryError("legacy permission event does not match the migrated database")
+    flags = tuple(data.get(name) for name in ("read", "write", "manage"))
+    if not all(isinstance(flag, bool) for flag in flags) or flags[2] > flags[1] or flags[1] > flags[0]:
+        raise RecoveryError("invalid permission flags in policy ledger")
+    try:
+        pid = parse_uuid(data.get("principal_id"), "principal_id")
+    except ServiceError as exc:
+        raise RecoveryError("invalid principal ID in permission ledger entry") from exc
+    return pid, *flags
+
+
+def _reduce_permissions(cur, permission):
+    """Intersect current permissions with the recorded maximum; never increase access on recovery."""
+    pid, read, write, manage = permission
+    cur.execute("UPDATE principals SET can_read = can_read AND %s, can_write = can_write AND %s, "
+                "can_manage = can_manage AND %s, auth_epoch = auth_epoch + 1 WHERE id = %s AND "
+                "((can_read AND NOT %s) OR (can_write AND NOT %s) OR (can_manage AND NOT %s))",
+                (read, write, manage, pid, read, write, manage))
+    if cur.rowcount:
+        operations.fence_principal_jobs(cur, pid)
 
 
 # --- verification and release ----------------------------------------------
 def verify_restore(config, target_database_url, ledger_path=None):
     """Checks the restored database against the ledger and the invariants. Returns {ok, checks, failures}."""
     ledger_path = ledger_path or config.policy_ledger
+    conn = connect(target_database_url)
+    try:
+        with conn.cursor() as cur:
+            control = _lock_restore(cur)
+            return _verify_locked(config, cur, control, ledger_path)[0]
+    finally:
+        conn.close()
+
+
+def _verify_locked(config, cur, control, ledger_path):
     checks, failures = [], []
 
-    def check(name, ok, detail=""):
+    def check(name, ok):
         checks.append(name)
         if not ok:
-            failures.append("%s%s" % (name, (": " + detail) if detail else ""))
-    entries = []
+            failures.append(name)
+
+    def count(query, params=()):
+        cur.execute(query, params)
+        return cur.fetchone()["n"]
+
+    entries, current = [], None
     if not ledger_path or not os.path.exists(ledger_path):
         failures.append("policy ledger unavailable")
     else:
         try:
-            entries = ledger.verify(ledger_path)[0]
+            entries, seq, digest = ledger.verify(ledger_path)
+            current = {"seq": seq, "hash": digest}
             checks.append("ledger chain valid")
         except ledger.LedgerError as exc:
             failures.append("ledger chain: %s" % exc)
-    conn = connect(target_database_url)
-    try:
-        n = lambda sql, p=(): _scalar(conn, sql, p)["n"]  # noqa: E731
-        check("no valid artifact cites a deleted source", n(
-            "SELECT count(*) AS n FROM artifacts a WHERE a.state = 'valid' AND (EXISTS (SELECT 1 FROM "
-            "artifact_sources s JOIN experiences e ON e.id = s.experience_id WHERE s.artifact_id = a.id AND "
-            "e.state = 'deleted') OR EXISTS (SELECT 1 FROM jobs j JOIN experiences e ON e.id = j.experience_id "
-            "WHERE j.id = a.job_id AND e.state = 'deleted'))") == 0)
-        check("deleted sources hold no content", n("SELECT count(*) AS n FROM experiences WHERE state = 'deleted' "
+    recorded = _restore_record(cur)
+    check("backup HMAC key matches", recorded is not None and recorded.get("hmac_key_id") == _key_fingerprint(config))
+    check("active generation is servable", count(
+        "SELECT count(*) AS n FROM generations WHERE id = %s AND state = 'servable'",
+        (control["active_generation_id"],)) == 1)
+    check("no valid artifact cites a deleted source", count(
+        "SELECT count(*) AS n FROM artifacts a WHERE a.state = 'valid' AND (EXISTS (SELECT 1 FROM "
+        "artifact_sources s JOIN experiences e ON e.id = s.experience_id WHERE s.artifact_id = a.id AND "
+        "e.state = 'deleted') OR EXISTS (SELECT 1 FROM jobs j JOIN experiences e ON e.id = j.experience_id "
+        "WHERE j.id = a.job_id AND e.state = 'deleted'))") == 0)
+    check("deleted sources hold no content", count("SELECT count(*) AS n FROM experiences WHERE state = 'deleted' "
                                                   "AND (raw_text IS NOT NULL OR source_metadata IS NOT NULL)") == 0)
-        check("no live leases or running jobs", n("SELECT count(*) AS n FROM jobs WHERE state = 'running' OR "
-                                                  "lease_owner IS NOT NULL") == 0)
-        check("no open jobs of revoked principals", n(
-            "SELECT count(*) AS n FROM jobs j JOIN principals p ON p.id = j.requested_by WHERE p.revoked_at IS NOT "
-            "NULL AND j.state IN ('queued', 'running')") == 0)
-        for entry in entries:
-            kind, data = entry["type"], entry["data"]
-            if kind == "delete_experience":
-                ok = n("SELECT count(*) AS n FROM experiences WHERE id = %s AND state <> 'deleted'",
+    check("no live leases or running jobs", count("SELECT count(*) AS n FROM jobs WHERE state = 'running' OR "
+                                                "lease_owner IS NOT NULL") == 0)
+    check("all open jobs have current write authority", count(
+        "SELECT count(*) AS n FROM jobs j JOIN principals p ON p.id = j.requested_by "
+        "WHERE j.state IN ('queued', 'running') AND "
+        "(p.revoked_at IS NOT NULL OR NOT p.can_write OR p.auth_epoch <> j.authority_epoch)") == 0)
+    for entry in entries:
+        kind, data = entry["type"], entry["data"]
+        if kind == "delete_experience":
+            ok = count("SELECT count(*) AS n FROM experiences WHERE id = %s AND state <> 'deleted'",
                        (data["experience_id"],)) == 0
-            elif kind == "revoke_principal":
-                ok = n("SELECT count(*) AS n FROM principals WHERE id = %s AND revoked_at IS NULL",
+        elif kind == "revoke_principal":
+            ok = count("SELECT count(*) AS n FROM principals WHERE id = %s AND revoked_at IS NULL",
                        (data["principal_id"],)) == 0
-            else:
-                ok = n("SELECT count(*) AS n FROM namespace_grants WHERE principal_id = %s AND namespace_id = %s AND "
+        else:
+            try:
+                permission = _permission_event(cur, kind, data)
+            except RecoveryError as exc:
+                failures.append("ledger #%d %s: %s" % (entry["seq"], kind, exc))
+                continue
+            ok = count("SELECT count(*) AS n FROM principals WHERE id = %s AND "
                        "((can_read AND NOT %s) OR (can_write AND NOT %s) OR (can_manage AND NOT %s))",
-                       (data["principal_id"], data["namespace_id"], data["read"], data["write"], data["manage"])) == 0
-            check("ledger #%d %s holds" % (entry["seq"], kind), ok)
-        state = _scalar(conn, "SELECT service_state FROM system_control")["service_state"]
-    finally:
-        conn.close()
-    return {"ok": not failures, "state": state, "checks": len(checks),
-            "failures": failures}
+                       permission) == 0
+        check("ledger #%d %s holds" % (entry["seq"], kind), ok)
+    return {"ok": not failures, "state": control["service_state"], "checks": len(checks),
+            "failures": failures}, current
 
 
 def release(config, target_database_url, attest_ledger_is_latest, ledger_path=None):
-    """Open the restored database for serving. Requires: verification passed, the replay covered the whole current
-    ledger, and an explicit operator attestation that this ledger is the newest one that exists."""
+    """Release requires verification, replay of the current head and operator attestation."""
     ledger_path = ledger_path or config.policy_ledger
     if not attest_ledger_is_latest:
-        raise RecoveryError("release requires --attest-ledger-is-latest: only the operator can know that no newer "
-                            "policy history (a newer ledger copy) exists elsewhere")
-    report = verify_restore(config, target_database_url, ledger_path)
-    if not report["ok"]:
-        raise RecoveryError("verification failed: %s" % "; ".join(report["failures"]))
-    current = ledger.head(ledger_path)
+        raise RecoveryError("release requires --attest-ledger-is-latest: only the operator can confirm the latest copy")
     conn = connect(target_database_url)
     try:
-        rows = _all(conn, "SELECT safe_details FROM audit_events WHERE event_type = 'recovery_reapplied' "
-                          "ORDER BY id DESC LIMIT 1")
-        if not rows or rows[0]["safe_details"]["ledger_head"] != current:
-            raise RecoveryError("the ledger changed since it was last re-applied: run reapply again")
         with conn.cursor() as cur:
-            cur.execute("SELECT service_state FROM system_control WHERE id = 1 FOR UPDATE")
-            if cur.fetchone()["service_state"] != "quarantined":
+            control = _lock_restore(cur)
+            if control["service_state"] != "quarantined":
                 raise RecoveryError("database is not quarantined")
+            report, current = _verify_locked(config, cur, control, ledger_path)
+            if not report["ok"]:
+                raise RecoveryError("verification failed: %s" % "; ".join(report["failures"]))
+            cur.execute("SELECT safe_details FROM audit_events WHERE event_type = 'recovery_reapplied' AND "
+                        "id > (SELECT max(id) FROM audit_events WHERE event_type = 'recovery_restored') "
+                        "ORDER BY id DESC LIMIT 1")
+            replay = cur.fetchone()
+            if not replay:
+                raise RecoveryError("this restore has not re-applied the ledger")
+            if replay["safe_details"]["ledger_head"] != current:
+                raise RecoveryError("the ledger changed since it was last re-applied: run reapply again")
             cur.execute("UPDATE system_control SET service_state = 'serving', service_state_changed_at = now()")
             operations._audit(cur, "recovery_released", None, {}, {"ledger_head": current, "attested": True})
         conn.commit()

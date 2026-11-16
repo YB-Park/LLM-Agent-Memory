@@ -33,7 +33,6 @@ SUCCEEDED, CANCELLED, FAILED, RETRY, STALE = "succeeded", "cancelled", "failed",
 @dataclass
 class Claim:
     job_id: str
-    namespace_id: str
     generation_id: str
     attempt: int
     lease_owner: str
@@ -75,9 +74,8 @@ class Worker(object):
         doc = _input_doc(exp["raw_text"], exp["source_metadata"])
         if job_input_digest(doc) != job["input_digest"]:
             return "INPUT_CHANGED"
-        cur.execute("SELECT p.auth_epoch, p.revoked_at, g.can_write FROM principals p "
-                    "LEFT JOIN namespace_grants g ON g.principal_id = p.id AND g.namespace_id = %s "
-                    "WHERE p.id = %s", (job["namespace_id"], job["requested_by"]))
+        cur.execute("SELECT auth_epoch, revoked_at, can_write FROM principals WHERE id = %s",
+                    (job["requested_by"],))
         who = cur.fetchone()
         if (who is None or who["revoked_at"] is not None or who["auth_epoch"] != job["authority_epoch"]
                 or not who["can_write"]):
@@ -117,7 +115,7 @@ class Worker(object):
             doc = _input_doc(row["raw_text"], meta)
             snap = Snapshot(str(job["experience_id"]), job["source_version"], doc["text"], doc["source"],
                             doc["submission"])
-            return Claim(str(job["id"]), str(job["namespace_id"]), str(job["generation_id"]), attempt,
+            return Claim(str(job["id"]), str(job["generation_id"]), attempt,
                          self.worker_id, row["engine_spec"], row["spec_digest"], job["input_digest"], snap)
         return None
 
@@ -237,18 +235,18 @@ class Worker(object):
     def _publish(self, cur, job, claim, drafts):
         for d in drafts:
             artifact_id = str(uuid.uuid4())
-            cur.execute("INSERT INTO artifacts (id, namespace_id, generation_id, job_id, local_key, "
+            cur.execute("INSERT INTO artifacts (id, generation_id, job_id, local_key, "
                         "payload_schema, payload, display_text, search_text, state) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'valid')",
-                        (artifact_id, job["namespace_id"], job["generation_id"], job["id"], d.local_key,
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'valid')",
+                        (artifact_id, job["generation_id"], job["id"], d.local_key,
                          d.payload_schema, Json(d.payload), d.display_text, d.search_text))
             for ref in d.source_refs:
                 spans = None
                 if "start_byte" in ref:
                     spans = Json({"start_byte": ref["start_byte"], "end_byte": ref["end_byte"]})
                 cur.execute("INSERT INTO artifact_sources (artifact_id, experience_id, source_version, "
-                            "namespace_id, spans) VALUES (%s, %s, %s, %s, %s)",
-                            (artifact_id, ref["experience_id"], ref["source_version"], job["namespace_id"], spans))
+                            "spans) VALUES (%s, %s, %s, %s)",
+                            (artifact_id, ref["experience_id"], ref["source_version"], spans))
         cur.execute("UPDATE jobs SET state = 'succeeded', output_count = %s, error_code = NULL, lease_owner = NULL, "
                     "lease_until = NULL, completed_at = now() WHERE id = %s", (len(drafts), job["id"]))
         cur.execute("UPDATE generations SET result_revision = result_revision + 1 WHERE id = %s",
