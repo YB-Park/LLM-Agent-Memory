@@ -27,6 +27,7 @@ REST는 `/v2/*`를 사용합니다. MCP는 `/mcp`에서 도구 목록을 다시 
 - **[Hindsight · MemoryLACE 연구 인사이트](docs/research/hindsight-memorylace-insights.md)** — 연구 내용과 우리가 얻은 통찰을 구분. 특정 엔진 채택 결정이 아님
 - **[향후 연구 질문과 평가 관점](docs/research/future-experiments-and-questions.md)** — 추출·통합·검색·시간·망각·재활성화·평가의 열린 질문; 고정 로드맵이 아님
 - **[Phase 1 스터디 보충 메모](docs/research/phase1-study-supplement.md)** — 논문·GitHub 구현과 기존 논의 사이의 판단 근거, 조용한 정보 손실·증거 사슬·시간·화자·엔진 교체 문제; 확정 구현 지시 아님
+- **[Phase 1 이론 설계 제안 — Hindsight 중심 + MemoryLACE 국소 생명주기](docs/research/phase1-hindsight-lace-theoretical-proposal.md)** — Retain/Recall/Reflect와 네 인식론적 기억 영역을 기본으로, 관계 갱신·Observation·검색 증거 확장의 결합 가능성, 충돌 지점, 판별 실험을 제안한 작업 가설
 - **[격리망 이전 핸드오프](docs/context/offline-handoff.md)** — 이전 전 테스트·미검증의 경계, 승인된 반입·오프라인 재현·보안 주의사항
 
 **격리 이후의 실제 코드·설정·로그·조직 데이터는 GitHub나 공개 LLM/외부 서비스로 반출하지 않는다.** 이후 내부에서 달라진 결정과 시험 결과는 사내에서 승인된 저장소·문서가 최신 기준이다.
